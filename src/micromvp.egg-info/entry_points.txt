@@ -1,0 +1,2 @@
+[console_scripts]
+micromvp = micromvp.main:main
