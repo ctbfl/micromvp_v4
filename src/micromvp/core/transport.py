@@ -3,15 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-
-Point = Tuple[float, float]
-
-
-@dataclass(slots=True)
-class Pose:
-    x: float
-    y: float
-    theta: float
+from micromvp.core.models import Pose, Point
 
 
 

@@ -227,7 +227,8 @@ class FieldCanvas(QtWidgets.QWidget):
                 target = self._world.targets.get(car.tag_id)
                 if target is None:
                     continue
-                target_s = self._world_to_screen(target[0], target[1])
+                # target is now a Waypoint (Pose) object with .x, .y, .theta
+                target_s = self._world_to_screen(target.x, target.y)
                 car_s = self._world_to_screen(car.x, car.y)
                 painter.drawLine(
                     int(car_s.x()),

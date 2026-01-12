@@ -6,7 +6,7 @@ from typing import List
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from micromvp.core.controller import Command, Controller
+from micromvp.core.controller import BaseController, Command, Controller
 from micromvp.core.patterns import circle_pattern, figure8_pattern
 from micromvp.core.planner import refine_paths, shuffle_paths
 from micromvp.ui.qt_canvas import CanvasConfig, FieldCanvas
@@ -14,7 +14,7 @@ from micromvp.utils.config import AppConfig
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, config: AppConfig, controller: Controller) -> None:
+    def __init__(self, config: AppConfig, controller: BaseController) -> None:
         super().__init__()
         self._config = config
         self._controller = controller
@@ -149,7 +149,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._controller.enqueue(Command("set_paths", paths))
 
 
-def run_app(config: AppConfig, controller: Controller) -> int:
+def run_app(config: AppConfig, controller: BaseController) -> int:
     app = QtWidgets.QApplication([])
     window = MainWindow(config, controller)
     window.show()

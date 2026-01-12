@@ -53,6 +53,13 @@ class AppConfig:
     # list of (car_id, tag_id)
     car_info: List[Tuple[int, int]] = field(default_factory=lambda: [(i, i) for i in range(1, 6)])
 
+    # Pose control configuration
+    use_pose_control: bool = False
+    pose_control_mode: str = "direct"  # "direct" or "path"
+    position_threshold: float = 10.0  # pixels - distance to consider position reached
+    angle_threshold: float = 0.1  # radians (~6 degrees) - angle error to consider orientation reached
+    min_turn_radius: float = 45.0  # pixels - minimum turn radius for Dubins curves
+
     def boundary(self) -> Boundary:
         margin = 2 * self.wheel_base
         left = margin
