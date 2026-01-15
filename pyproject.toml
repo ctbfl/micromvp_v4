@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "micromvp"
+version = "0.1.0"
+description = "Modernized microMVP control stack"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "BSD-3-Clause" }
+authors = [{ name = "microMVP maintainers" }]
+
+dependencies = [
+  "PyQt6>=6.6",
+  "numpy>=1.26",
+  "opencv-contrib-python>=4.8",
+  "pyzmq>=25.1",
+  "pyserial>=3.5",
+  "pyusb>=1.2",
+  "munkres>=1.1",
+]
+
+[project.scripts]
+micromvp = "micromvp.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
