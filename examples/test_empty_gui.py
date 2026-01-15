@@ -1,4 +1,7 @@
 """
+Only include GUI.
+
+
 MicroMVP GUI 功能测试脚本
 该脚本用于在没有真实环境和控制器的情况下，独立测试 GUI 模块的所有功能。
 测试覆盖：
