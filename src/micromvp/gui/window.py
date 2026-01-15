@@ -123,6 +123,11 @@ class MVPWindow(QMainWindow):
         splitter.setStretchFactor(1, 0)  # Separator: fixed
         splitter.setStretchFactor(2, 1)  # Canvas: expandable
 
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        splitter.setCollapsible(2, False)
+
+
         # Set initial sizes (sidebar ~300px, rest for canvas)
         splitter.setSizes([300, 2, 700])
 

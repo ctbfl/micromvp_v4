@@ -42,7 +42,7 @@ def run_test():
     gui_config = {
         "canvas": {
             "draw_curve_callback": True,
-            "click_canvas_callback": True
+            "click_canvas_callback": False
         },
         "control_panel": [
             {"type": "label", "text": "=== 模拟测试控制 ==="},
@@ -96,6 +96,9 @@ def run_test():
     def handle_curve(points: List[Point]):
         print(f"[GUI Event] User drew a curve with {len(points)} points.")
 
+    def handle_cmd(string_cmd: str):
+        print(f"[GUI Command] Received console command: {string_cmd}")
+
     # --- 5. 实例化窗口并注册回调 ---
     # 注意：此时还没开始逻辑循环
     gui = MVPWindow(gui_config, ws_config)
@@ -107,6 +110,7 @@ def run_test():
     gui.register_callback("on_car_click", handle_click)
     gui.register_callback("on_canvas_click", handle_canvas_click)
     gui.register_callback("on_curve_drawn", handle_curve)
+    gui.register_callback("console_cmd", handle_cmd)
 
     # --- 6. 核心逻辑模拟循环 (仿真逻辑线程) ---
     def logic_thread():

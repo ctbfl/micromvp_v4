@@ -6,7 +6,7 @@ Contains:
 - CarInspector: Car state display panel
 """
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QVBoxLayout,
     QWidget,
+    QSplitter,
 )
 
 from micromvp.core.models import CarState
@@ -85,9 +86,15 @@ class CarInspector(QGroupBox):
     Shows all fields from CarState including metadata.
     """
 
+    HIDDEN_TEXT = "<hidden>"
+
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__("Car Inspector", parent)
         self._current_car_id: Optional[int] = None
+
+        # metadata layout bookkeeping
+        self._metadata_keys: Tuple[str, ...] = ()
+        self._metadata_value_labels: Dict[str, QLabel] = {}
 
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -108,7 +115,7 @@ class CarInspector(QGroupBox):
         scroll.setWidget(self._content)
         main_layout.addWidget(scroll)
 
-        # Field labels
+        # Standard field labels
         self._fields: Dict[str, QLabel] = {}
 
         # Initialize with empty state
@@ -116,7 +123,6 @@ class CarInspector(QGroupBox):
         self.clear()
 
     def _init_fields(self) -> None:
-        """Initialize the standard field labels."""
         field_names = [
             ("car_id", "ID"),
             ("x", "X"),
@@ -134,10 +140,10 @@ class CarInspector(QGroupBox):
             self._form_layout.addRow(f"{label_text}:", value_label)
 
         # Separator for metadata
-        separator = QFrame()
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setFrameShadow(QFrame.Shadow.Sunken)
-        self._form_layout.addRow(separator)
+        self._separator = QFrame()
+        self._separator.setFrameShape(QFrame.Shape.HLine)
+        self._separator.setFrameShadow(QFrame.Shadow.Sunken)
+        self._form_layout.addRow(self._separator)
 
         # Metadata header
         self._metadata_header = QLabel("Metadata")
@@ -145,24 +151,15 @@ class CarInspector(QGroupBox):
         self._form_layout.addRow(self._metadata_header)
 
     def clear(self) -> None:
-        """Clear the inspector display."""
         self._current_car_id = None
         for label in self._fields.values():
             label.setText("-")
 
-        # Clear metadata rows (keep standard fields)
         self._clear_metadata_rows()
         self.setTitle("Car Inspector")
 
-    def _clear_metadata_rows(self) -> None:
-        """Remove dynamic metadata rows."""
-        # Keep only the standard rows (field_count + separator + header)
-        standard_row_count = len(self._fields) + 2
-        while self._form_layout.rowCount() > standard_row_count:
-            self._form_layout.removeRow(standard_row_count)
-
     def update_state(self, state: CarState) -> None:
-        """Update the inspector with a car's state."""
+        car_changed = (self._current_car_id is None) or (self._current_car_id != state.car_id)
         self._current_car_id = state.car_id
         self.setTitle(f"Car Inspector - #{state.car_id}")
 
@@ -175,45 +172,75 @@ class CarInspector(QGroupBox):
         self._fields["angular_velocity"].setText(f"{state.angular_velocity:.3f}")
         self._fields["status_label"].setText(state.status_label)
 
-        # Update metadata
+        # Build metadata rows only when selecting a new car
+        if car_changed:
+            self._build_metadata_schema(state.metadata)
+
+        # Update metadata values only (no flashing keys)
+        for key in self._metadata_keys:
+            value = state.metadata.get(key, None)
+            self._metadata_value_labels[key].setText(self._format_value(value))
+
+    def _build_metadata_schema(self, metadata: Dict[str, Any]) -> None:
+        """
+        Rebuild metadata rows once when a new car is selected.
+        Assumption: for a given car, keys are stable afterwards.
+        """
         self._clear_metadata_rows()
-        for key, value in state.metadata.items():
-            value_label = QLabel(self._format_value(value))
+
+        keys = list(metadata.keys())
+        # keep original insertion order from dict; if you prefer stable sort, uncomment:
+        # keys = sorted(keys)
+
+        self._metadata_keys = tuple(keys)
+        self._metadata_value_labels = {}
+
+        for key in self._metadata_keys:
+            value_label = QLabel("-")
             value_label.setStyleSheet("color: #666;")
             value_label.setWordWrap(True)
+            self._metadata_value_labels[key] = value_label
             self._form_layout.addRow(f"{key}:", value_label)
 
+    def _clear_metadata_rows(self) -> None:
+        """Remove all metadata rows (below the header)."""
+        # Standard rows = len(fields) + separator + header
+        standard_row_count = len(self._fields) + 2
+        while self._form_layout.rowCount() > standard_row_count:
+            self._form_layout.removeRow(standard_row_count)
+
+        self._metadata_keys = ()
+        self._metadata_value_labels = {}
+
+    def _is_simple(self, value: Any) -> bool:
+        """Simple enough to display directly."""
+        if value is None:
+            return True
+        return isinstance(value, (bool, int, float, str))
+
     def _format_value(self, value: Any) -> str:
-        """Format a metadata value for display."""
+        """Format metadata value; complex types become <hidden>."""
+        if not self._is_simple(value):
+            return self.HIDDEN_TEXT
+
+        if value is None:
+            return "None"
+        if isinstance(value, bool):
+            return "True" if value else "False"
         if isinstance(value, float):
             return f"{value:.4f}"
-        elif isinstance(value, (list, tuple)):
-            if len(value) <= 3:
-                return str(value)
-            return f"[{len(value)} items]"
-        elif isinstance(value, dict):
-            return f"{{{len(value)} keys}}"
         return str(value)
 
     @property
     def current_car_id(self) -> Optional[int]:
-        """Get the currently displayed car ID."""
         return self._current_car_id
 
 
 class Sidebar(QWidget):
-    """
-    Complete sidebar containing control panel and car inspector.
-    """
-
     MIN_WIDTH = 250
     PREFERRED_WIDTH = 300
 
-    def __init__(
-        self,
-        control_config: List[Dict[str, Any]],
-        parent: Optional[QWidget] = None,
-    ):
+    def __init__(self, control_config, parent=None):
         super().__init__(parent)
         self.setMinimumWidth(self.MIN_WIDTH)
         self.setMaximumWidth(400)
@@ -221,17 +248,28 @@ class Sidebar(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(8)
+        layout.setSpacing(0)  # splitter 自己会留缝
 
-        # Control Panel (top, expandable)
         self._control_panel = ControlPanel(control_config)
-        layout.addWidget(self._control_panel, stretch=1)
-
-        # Car Inspector (bottom, fixed height)
         self._car_inspector = CarInspector()
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(self._control_panel)
+        splitter.addWidget(self._car_inspector)
+
+        # 可选：设初始比例（上大下小）
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+
+        # 可选：允许 inspector 拉得更大
+        # 重要：不要再 setMaximumHeight(350) 这种上限
+        self._control_panel.setMinimumHeight(200)
         self._car_inspector.setMinimumHeight(200)
-        self._car_inspector.setMaximumHeight(350)
-        layout.addWidget(self._car_inspector)
+
+        layout.addWidget(splitter)
 
     @property
     def control_panel(self) -> ControlPanel:
