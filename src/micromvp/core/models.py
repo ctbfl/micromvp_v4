@@ -62,6 +62,9 @@ class WorkspaceConfig:
     # 5. 系统频率
     frequency: float       # Env.step() 的每秒执行次数
 
+    # 6. Number of robots/cars in this workspace
+    car_id_list: list
+
     @property
     def dt(self) -> float:
         # return 每次时间步长 (秒)
@@ -141,9 +144,9 @@ class TargetPose:
     """
     x: float
     y: float
-    theta: Optional[float] = None       # Sometimes we do not care about theta, but if provided, we will try to reach it.
     tolerance_pos_ratio: float          # Position tolerance in percentage of car size
     tolerance_theta: float              # Orientation tolerance in radians
+    theta: Optional[float] = None       # Sometimes we do not care about theta, but if provided, we will try to reach it.
 
     @property
     def position(self) -> Point:
@@ -167,8 +170,8 @@ class CarState:
     theta: float = 0.0
     
     # 当前estimated 速度状态
-    l_speed: float = 0.0
-    r_speed: float = 0.0
+    linear_velocity: float = 0.0
+    angular_velocity: float = 0.0
     
     # 核心状态机标签 (使用字符串或 Metadata 以支持不同控制器)
     # 让控制器自己定义字符串标签
