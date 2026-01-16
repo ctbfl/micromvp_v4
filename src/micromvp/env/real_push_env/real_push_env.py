@@ -18,7 +18,7 @@ from micromvp.core.models import Action, RobotObservation, WorkspaceConfig
 from micromvp.env.base import Environment
 
 from .observer import ArucoObserver, ObserverConfig, WORKSPACE_W_CM, WORKSPACE_H_CM
-from .udp_action import UDPActionSender, UDPActionConfig, RobotEndpoint
+from .udp_action import SerialActionSender, SerialActionConfig, RobotEndpoint
 
 
 @dataclass
@@ -94,12 +94,12 @@ class RealPushEnv(Environment):
         )
         self._observer = ArucoObserver(obs_config)
 
-        action_config = UDPActionConfig(
+        action_config = SerialActionConfig(
             endpoints=[RobotEndpoint(robot_id=ep[0], ip=ep[1], port=ep[2]) for ep in config.robot_endpoints],
             send_hz=config.send_hz,
             invert_right_wheel=config.invert_right_wheel,
         )
-        self._action_sender = UDPActionSender(action_config)
+        self._action_sender = SerialActionSender(action_config)
         self._speed_scale = 1.0
 
     @property
