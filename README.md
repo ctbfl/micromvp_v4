@@ -55,6 +55,14 @@ python examples/test_sim_env_keyboard.py
 
 Controls: `W/A/S/D` to move, `1-9` to select robot, `Tab` to cycle, `Space` to stop.
 
+### Multi-Robot Formation (Simulation)
+
+```bash
+python examples/test_sim_formation.py --cars 8 --pattern circle
+```
+
+Watch multiple robots follow a moving formation pattern. Use the GUI sliders to adjust car count, point speed, and car speed.
+
 ### Real Hardware with Path Following
 
 ```bash
@@ -79,11 +87,15 @@ micromvp_v4/
 │   ├── controller/              # Per-robot control algorithms
 │   │   ├── base.py              # Abstract Controller interface
 │   │   ├── WASD_controller/     # Manual keyboard control
-│   │   └── follow_path_controller/  # Pure pursuit path following
+│   │   ├── follow_path_controller/  # Pure pursuit path following
+│   │   └── target_follow_controller/ # Follow moving target point
 │   ├── coordinator/             # High-level orchestration
 │   │   ├── base.py              # Abstract Coordinator interface
 │   │   ├── keyboard_coordinator/    # Multi-robot keyboard control
-│   │   └── follow_path_coordinator/ # Path assignment coordination
+│   │   ├── follow_path_coordinator/ # Path assignment coordination
+│   │   └── formation_coordinator/   # Multi-robot formation patterns
+│   ├── utils/                   # Utility classes
+│   │   └── config.py            # Boundary and configuration helpers
 │   └── gui/                     # PyQt6 visualization
 │       ├── window.py            # Main MVPWindow
 │       ├── canvas.py            # Workspace rendering
@@ -205,6 +217,7 @@ gui.update(car_states, drawings)
 | `test_sim_env.py` | Minimal simulation without GUI |
 | `test_empty_gui.py` | GUI widgets and canvas without environment |
 | `test_sim_env_keyboard.py` | Simulation with keyboard control |
+| `test_sim_formation.py` | Multi-robot formation with circle/figure-8 patterns |
 | `test_real_env_keyboard.py` | Real hardware with keyboard control |
 | `test_real_env_follow_path.py` | Real hardware with path following |
 
