@@ -37,6 +37,17 @@ class UpdateSignalEmitter(QObject):
     update_requested = pyqtSignal(dict, list)
 
 
+class KeyboardSignalEmitter(QObject):
+    """
+    Helper class to emit keyboard signals.
+
+    Provides signals for key press and release events.
+    """
+
+    key_pressed = pyqtSignal(str)
+    key_released = pyqtSignal(str)
+
+
 class MVPWindow(QMainWindow):
     """
     Main MicroMVP GUI Window.
@@ -79,10 +90,18 @@ class MVPWindow(QMainWindow):
         self._update_emitter = UpdateSignalEmitter()
         self._update_emitter.update_requested.connect(self._handle_update)
 
+        # Keyboard event handling
+        self._keyboard_emitter = KeyboardSignalEmitter()
+        self._keyboard_emitter.key_pressed.connect(self._on_key_press)
+        self._keyboard_emitter.key_released.connect(self._on_key_release)
+
         # Setup UI
         self._setup_window()
         self._setup_layout()
         self._connect_signals()
+
+        # Enable keyboard focus
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def _setup_window(self) -> None:
         """Configure main window properties."""
@@ -150,13 +169,15 @@ class MVPWindow(QMainWindow):
 
     def register_callback(self, callback_name: str, func: Callable) -> None:
         """
-        Register a callback function for a control or canvas event.
+        Register a callback function for a control, canvas, or keyboard event.
 
         Args:
             callback_name: Name matching config's callback_name or predefined events:
                 - Control panel widgets: as defined in config
                 - Canvas events: "on_canvas_click", "on_car_click", "on_curve_drawn"
-            func: Callback function to invoke
+                - Keyboard events: "on_key_press", "on_key_release"
+            func: Callback function to invoke.
+                  For keyboard events, func receives key name (str) as argument.
         """
         self._callbacks[callback_name] = func
 
@@ -191,6 +212,84 @@ class MVPWindow(QMainWindow):
         callback = self._callbacks.get("on_curve_drawn")
         if callback:
             callback(points)
+
+    # -------------------------------------------------------------------------
+    # Keyboard Event Handlers
+    # -------------------------------------------------------------------------
+
+    def keyPressEvent(self, event) -> None:
+        """
+        Handle key press events.
+
+        Converts Qt key to lowercase string and emits signal.
+        """
+        key_name = self._qt_key_to_string(event)
+        if key_name and not event.isAutoRepeat():
+            self._keyboard_emitter.key_pressed.emit(key_name)
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event) -> None:
+        """
+        Handle key release events.
+
+        Converts Qt key to lowercase string and emits signal.
+        """
+        key_name = self._qt_key_to_string(event)
+        if key_name and not event.isAutoRepeat():
+            self._keyboard_emitter.key_released.emit(key_name)
+        super().keyReleaseEvent(event)
+
+    def _qt_key_to_string(self, event) -> Optional[str]:
+        """
+        Convert Qt key event to lowercase key string.
+
+        Returns:
+            Lowercase key name (e.g., "w", "a", "space", "tab", "1")
+            or None if the key is not recognized.
+        """
+        from PyQt6.QtCore import Qt as QtCore
+
+        key = event.key()
+
+        # Letter keys (A-Z)
+        if QtCore.Key.Key_A <= key <= QtCore.Key.Key_Z:
+            return chr(key).lower()
+
+        # Number keys (0-9)
+        if QtCore.Key.Key_0 <= key <= QtCore.Key.Key_9:
+            return chr(key)
+
+        # Special keys
+        special_keys = {
+            QtCore.Key.Key_Space: "space",
+            QtCore.Key.Key_Tab: "tab",
+            QtCore.Key.Key_Return: "return",
+            QtCore.Key.Key_Enter: "enter",
+            QtCore.Key.Key_Escape: "escape",
+            QtCore.Key.Key_Backspace: "backspace",
+            QtCore.Key.Key_Delete: "delete",
+            QtCore.Key.Key_Up: "up",
+            QtCore.Key.Key_Down: "down",
+            QtCore.Key.Key_Left: "left",
+            QtCore.Key.Key_Right: "right",
+            QtCore.Key.Key_Shift: "shift",
+            QtCore.Key.Key_Control: "ctrl",
+            QtCore.Key.Key_Alt: "alt",
+        }
+
+        return special_keys.get(key)
+
+    def _on_key_press(self, key: str) -> None:
+        """Handle key press signal."""
+        callback = self._callbacks.get("on_key_press")
+        if callback:
+            callback(key)
+
+    def _on_key_release(self, key: str) -> None:
+        """Handle key release signal."""
+        callback = self._callbacks.get("on_key_release")
+        if callback:
+            callback(key)
 
     # -------------------------------------------------------------------------
     # Update API (Thread-Safe)

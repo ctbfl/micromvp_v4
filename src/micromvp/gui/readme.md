@@ -142,6 +142,17 @@ Register a callback function for control panel widgets or canvas events.
 - `"on_car_click"` - `func(car_id: int)` - Clicked car ID
 - `"on_curve_drawn"` - `func(points: List[Tuple[float, float]])` - Drawn curve points
 
+**Predefined keyboard callbacks:**
+- `"on_key_press"` - `func(key: str)` - Key pressed (lowercase key name)
+- `"on_key_release"` - `func(key: str)` - Key released (lowercase key name)
+
+Supported key names:
+- Letters: `"a"` - `"z"` (lowercase)
+- Numbers: `"0"` - `"9"`
+- Special: `"space"`, `"tab"`, `"return"`, `"enter"`, `"escape"`, `"backspace"`, `"delete"`
+- Arrows: `"up"`, `"down"`, `"left"`, `"right"`
+- Modifiers: `"shift"`, `"ctrl"`, `"alt"`
+
 #### `update(world_state, additional_drawings=None)`
 Thread-safe method to update the GUI from the logic thread.
 
@@ -191,7 +202,7 @@ The canvas uses UUID-based retained mode rendering. Each drawing object is ident
     "center": (cx, cy),
     "radius": 10,
     "color": "#00FF00",  # outline color
-    "fill": "#00FF00",   # fill color
+    "fill": "#00FF00",   # optional: fill color (no fill by default)
     "width": 2
 }
 ```
@@ -204,7 +215,7 @@ The canvas uses UUID-based retained mode rendering. Each drawing object is ident
     "position": (x, y),  # top-left in workspace coords
     "size": (w, h),
     "color": "#0000FF",
-    "fill": "#0000FF",
+    "fill": "#0000FF",   # optional: fill color (no fill by default)
     "width": 2
 }
 ```
@@ -228,7 +239,7 @@ The canvas uses UUID-based retained mode rendering. Each drawing object is ident
     "position": (x, y),
     "radius": 3,
     "color": "#FFFF00",
-    "fill": "#FFFF00"
+    "fill": "#FFFF00"  # optional: fill color (no fill by default)
 }
 ```
 
@@ -240,6 +251,19 @@ The canvas uses UUID-based retained mode rendering. Each drawing object is ident
 - **Units**: Defined by `WorkspaceConfig` (typically pixels or cm)
 
 The canvas automatically handles the Y-axis flip for PyQt rendering.
+
+## Scale-Independent Rendering
+
+The canvas uses **cosmetic pens** for consistent UI appearance regardless of workspace units:
+
+- **Stroke widths** (`width` parameter): Always in screen pixels (e.g., `width: 2` = 2 pixels)
+- **Point radius** (`type: "point"`): Interpreted as screen pixels
+- **Circle/Rect sizes** (`type: "circle"`, `type: "rect"`): In workspace units (physical size)
+
+This means:
+- A line with `width: 2` looks the same whether workspace is 800px or 40cm
+- A point with `radius: 5` is always 5 pixels on screen
+- A circle with `radius: 10` represents 10 workspace units (scales with view)
 
 ## Threading Model
 
@@ -273,6 +297,68 @@ Clicking a car on the canvas automatically updates the Car Inspector panel with:
 - Velocities (linear, angular)
 - Status label
 - Custom metadata from `CarState.metadata`
+
+## Keyboard Control Example
+
+Using the GUI with `KeyboardCoordinator` for manual robot control:
+
+```python
+import threading
+import time
+
+from micromvp.gui import MVPWindow
+from micromvp.env import SimEnv, SimConfig
+from micromvp.controller import WASDController
+from micromvp.coordinator import KeyboardCoordinator
+
+# Setup environment
+sim_config = SimConfig(
+    width=800, height=600,
+    initial_poses=[(1, 200, 200, 0), (2, 400, 300, 90)]
+)
+env = SimEnv(sim_config)
+ws_config = env.workspace_config
+
+# Setup controllers and coordinator
+controllers = {
+    robot_id: WASDController(robot_id, ws_config)
+    for robot_id in ws_config.car_id_list
+}
+coordinator = KeyboardCoordinator(ws_config, controllers)
+
+# Setup GUI
+gui_config = {"canvas": {"click_canvas_callback": True}}
+gui = MVPWindow(gui_config, ws_config)
+
+# Register keyboard callbacks
+gui.register_callback("on_key_press", coordinator.on_key_press)
+gui.register_callback("on_key_release", coordinator.on_key_release)
+gui.register_callback("on_car_click", coordinator.on_car_click)
+
+# Logic loop
+def logic_loop():
+    while True:
+        observations = env.observe()
+        actions = coordinator.process(observations)
+        env.apply_actions(actions)
+
+        # Update GUI
+        car_states = {s.car_id: s for s in coordinator.gather_car_state()}
+        drawings = coordinator.get_additional_drawings()
+        gui.update(car_states, drawings)
+
+        time.sleep(1 / ws_config.frequency)
+
+threading.Thread(target=logic_loop, daemon=True).start()
+gui.run()
+```
+
+**Controls:**
+- **1-9**: Select robot by index
+- **Tab**: Cycle to next robot
+- **W/A/S/D**: Move selected robot (forward/left/backward/right)
+- **Space**: Emergency stop all robots
+- **Click car**: Select robot
 
 ## Module Structure
 

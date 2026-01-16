@@ -70,7 +70,7 @@ class Environment(ABC):
 
     def set_speed_scale(self, scale: float) -> None:
         """
-        Set global speed scale (0.0 to 1.0+).
+        Set global speed scale (0.0 to 1.0).
 
         This allows pausing (scale=0) or slowing down the system.
         Default implementation does nothing.

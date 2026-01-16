@@ -45,7 +45,7 @@ def run_test():
     gui_config = {
         "canvas": {
             "draw_curve_callback": True,
-            "click_canvas_callback": False
+            "click_canvas_callback": True
         },
         "control_panel": [
             {"type": "label", "text": "=== 模拟测试控制 ==="},
