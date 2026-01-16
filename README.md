@@ -333,7 +333,3 @@ class MyCoordinator(Coordinator):
 - **Y-axis**: Points up (positive)
 - **Theta**: 0° = +X direction, counter-clockwise positive
 - **Units**: Defined by WorkspaceConfig (typically pixels or cm)
-
-## License
-
-MIT License
