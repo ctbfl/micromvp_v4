@@ -38,7 +38,7 @@ class UDPActionConfig:
     endpoints: list = field(default_factory=list)
 
     # Command sending rate (Hz) - sends commands at this frequency
-    send_hz: float = 50.0
+    send_hz: float = 30.0
 
     # Invert right wheel (some robots have reversed motor wiring)
     invert_right_wheel: bool = True

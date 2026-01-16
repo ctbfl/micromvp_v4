@@ -35,7 +35,7 @@ class RealPushConfig:
 
     # Dynamics (cm/s)
     wheel_base: float = 4.2
-    max_wheel_speed: float = 4.0
+    max_wheel_speed: float = 10.0
     frequency: float = 30.0
 
     # Robot endpoints [(id, ip, port), ...]
@@ -100,7 +100,7 @@ class RealPushEnv(Environment):
             invert_right_wheel=config.invert_right_wheel,
         )
         self._action_sender = UDPActionSender(action_config)
-        self._speed_scale = 0.5
+        self._speed_scale = 1.0
 
     @property
     def workspace_config(self) -> WorkspaceConfig:
