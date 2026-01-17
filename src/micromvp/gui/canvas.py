@@ -158,7 +158,7 @@ class CarGraphicsItem(QGraphicsObject):
         self._off_h_px = float(off_h_px)
 
         # update hit rect/path in LOCAL PIXELS
-        self._hit_rect = QRectF(-self._off_w_px, -self._off_h_px, self._w_px, self._h_px)
+        self._hit_rect = QRectF(-(self._w_px-self._off_w_px), -(self._h_px-self._off_h_px), self._w_px, self._h_px)
         self._hit_path = QPainterPath()
         self._hit_path.addRect(self._hit_rect)
 

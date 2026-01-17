@@ -3,7 +3,7 @@ Test keyboard control of real robots in the 1st Spring St setup.
 
 This example uses:
 - ArUco camera observation (with warmup)
-- UDP action sending to robots
+- Serial action sending to robots (by robot ID)
 - WASD keyboard control via GUI
 
 Controls:
@@ -17,9 +17,9 @@ Controls:
 - Escape: Quit
 
 Prerequisites:
-- Camera calibration file at: /home/omen/junshan/micromvp_push/camera/config/camera.yaml
+- Camera calibration file at configured path
 - Workspace markers (5x5 ArUco) placed on table
-- Robot(s) with 4x4 ArUco markers, connected to network
+- Robot(s) with 4x4 ArUco markers
 """
 import threading
 import time
@@ -38,12 +38,8 @@ def handle_canvas_click(x, y):
 def main():
     parser = argparse.ArgumentParser(description="Real robot keyboard control test")
     parser.add_argument(
-        "--robots", type=str, default="1:10.0.0.100",
-        help="Robot endpoints as 'id:ip,id:ip,...' (e.g., '1:10.0.0.100,2:10.0.0.101')"
-    )
-    parser.add_argument(
-        "--port", type=int, default=9001,
-        help="UDP port for robot commands (default: 9001)"
+        "--robots", type=str, default="1",
+        help="Robot IDs as 'id,id,...' (e.g., '1,2,3')"
     )
     parser.add_argument(
         "--camera", type=int, default=0,
@@ -64,35 +60,29 @@ def main():
     )
     args = parser.parse_args()
 
-    # Parse robot endpoints
-    robot_endpoints = []
+    # Parse robot IDs
+    robot_ids = []
     for entry in args.robots.split(","):
-        parts = entry.strip().split(":")
-        if len(parts) == 2:
-            robot_id = int(parts[0])
-            ip = parts[1]
-            robot_endpoints.append((robot_id, ip, args.port))
-        else:
-            print(f"Invalid robot entry: {entry}")
-            return
+        entry = entry.strip()
+        if entry:
+            robot_ids.append(int(entry))
 
-    if not robot_endpoints:
-        print("No robots specified. Use --robots 'id:ip,id:ip,...'")
+    if not robot_ids:
+        print("No robots specified. Use --robots 'id,id,...'")
         return
 
-    print(f"Configuring {len(robot_endpoints)} robot(s):")
-    for rid, ip, port in robot_endpoints:
-        print(f"  Robot {rid}: {ip}:{port}")
+    print(f"Configuring {len(robot_ids)} robot(s):")
+    for rid in robot_ids:
+        print(f"  Robot {rid}")
 
     # Setup real environment
     config = RealPushConfig(
-        robot_endpoints=robot_endpoints,
+        robot_ids=robot_ids,
         camera_device=args.camera,
         calibration_file=args.calib,
         warmup_frames=args.warmup,
         no_preview=args.no_preview,
     )
-    print("config.no_preview", config.no_preview)
     env = RealPushEnv(config)
 
     # Start environment (this runs warmup if configured)
@@ -128,7 +118,7 @@ def main():
             {"type": "label", "text": "Tab: Next robot"},
             {"type": "label", "text": "Space: Stop all"},
             {"type": "label", "text": ""},
-            {"type": "label", "text": f"Robots: {len(robot_endpoints)}"},
+            {"type": "label", "text": f"Robots: {len(robot_ids)}"},
         ],
     }
     gui = MVPWindow(gui_config, ws_config)

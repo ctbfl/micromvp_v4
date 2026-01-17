@@ -29,14 +29,14 @@ from micromvp.core.models import Action
 class SerialActionConfig:
     """Configuration for Serial action sender."""
     # 串口配置
-    port: str = "/dev/ttyUSB0"
+    port: str = "/dev/ttyACM0"
     baudrate: int = 115200
     
     # 发送频率 (Hz)
     send_hz: float = 30.0
 
     # 是否反转右轮 (部分电机接线相反)
-    invert_right_wheel: bool = True
+    invert_right_wheel: bool = False
 
     # 预设的活跃 Robot ID 列表 (用于初始化)
     # 串口是广播总线，如果你只控制 ID 1 和 2，可以在这里指定

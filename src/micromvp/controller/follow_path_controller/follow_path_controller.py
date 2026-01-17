@@ -355,3 +355,12 @@ class FollowPathController(Controller):
         self._car_state.metadata.pop("path", None)
         self._car_state.metadata.pop("path_index", None)
         self._car_state.metadata.pop("target_point", None)
+
+    def set_speed(self, speed: float) -> None:
+        """
+        Internal method to set max speed.
+
+        Args:
+            speed: New maximum speed [0, 1]
+        """
+        self._max_speed = max(0.0, min(1.0, speed))

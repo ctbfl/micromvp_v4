@@ -338,6 +338,17 @@ class FollowPathCoordinator(Coordinator):
         if controller is not None and isinstance(controller, FollowPathController):
             controller.clear_path()
 
+    def set_all_speeds(self, speed: float) -> None:
+        """
+        Set speed for all controllers.
+
+        Args:
+            speed: Speed value in range [0, 1]
+        """
+        for controller in self._controllers.values():
+            if hasattr(controller, "set_speed"):
+                controller.set_speed(speed)
+
     def reset(self) -> None:
         """Reset coordinator and all controllers."""
         self._pressed_keys.clear()

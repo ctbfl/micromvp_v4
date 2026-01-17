@@ -12,13 +12,13 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 from micromvp.core.models import Action, RobotObservation, WorkspaceConfig
 from micromvp.env.base import Environment
 
 from .observer import ArucoObserver, ObserverConfig, WORKSPACE_W_CM, WORKSPACE_H_CM
-from .udp_action import SerialActionSender, SerialActionConfig, RobotEndpoint
+from .serial_action import SerialActionSender, SerialActionConfig
 
 
 @dataclass
@@ -28,18 +28,18 @@ class RealPushConfig:
     height: float = WORKSPACE_H_CM
 
     # Car geometry (cm)
-    car_width: float = 4.8
-    car_height: float = 4.8
-    offset_w: float = 2.4
-    offset_h: float = 2.4
+    car_width: float = 4.2
+    car_height: float = 5.4
+    offset_w: float = 2.1
+    offset_h: float = 4.1
 
     # Dynamics (cm/s)
     wheel_base: float = 4.2
     max_wheel_speed: float = 10.0
     frequency: float = 30.0
 
-    # Robot endpoints [(id, ip, port), ...]
-    robot_endpoints: List[Tuple[int, str, int]] = field(default_factory=list)
+    # Robot IDs [id, id, ...] (IP/Port no longer needed)
+    robot_ids: List[int] = field(default_factory=list)
 
     # Camera settings
     camera_device: int = 0
@@ -51,7 +51,8 @@ class RealPushConfig:
     # Observer settings
     workspace_dict: str = "DICT_5X5_50"
     car_dict: str = "DICT_4X4_50"
-    car_marker_size_mm: float = 36.0
+    car_marker_size_mm: float = 27.0
+    marker_center_to_wheel_center_offset_cm: list = (0.0, 1.1)
     warmup_frames: int = 30
 
     # The ONLY preview option you want
@@ -59,7 +60,27 @@ class RealPushConfig:
 
     # Action settings
     send_hz: float = 60.0
-    invert_right_wheel: bool = True
+    invert_right_wheel: bool = False
+
+# sample config ready to use:
+v3_config = RealPushConfig(
+    car_width=4.8,
+    car_height=5.2,
+    offset_w=2.4,
+    offset_h=2.6,
+    wheel_base=4.2,
+    marker_center_to_wheel_center_offset_cm=(0.0, 0.0),
+    car_marker_size_mm=36.0
+)
+v4_config = RealPushConfig(
+    car_width=4.2,
+    car_height=5.4,
+    offset_w=2.1,
+    offset_h=4.1,
+    wheel_base=4.2,
+    marker_center_to_wheel_center_offset_cm=(0.0, 0.0),
+    car_marker_size_mm=27.0
+)
 
 
 class RealPushEnv(Environment):
@@ -77,7 +98,7 @@ class RealPushEnv(Environment):
             wheel_base=config.wheel_base,
             max_wheel_speed=config.max_wheel_speed,
             frequency=config.frequency,
-            car_id_list=[ep[0] for ep in config.robot_endpoints],
+            car_id_list=config.robot_ids,
         )
 
         obs_config = ObserverConfig(
@@ -91,11 +112,13 @@ class RealPushEnv(Environment):
             car_marker_size_mm=config.car_marker_size_mm,
             warmup_frames=config.warmup_frames,
             no_preview=config.no_preview,
+            marker_center_to_wheel_center_offset_cm=config.marker_center_to_wheel_center_offset_cm,
         )
         self._observer = ArucoObserver(obs_config)
 
+        # Removed RobotEndpoint logic, passing just the IDs
         action_config = SerialActionConfig(
-            endpoints=[RobotEndpoint(robot_id=ep[0], ip=ep[1], port=ep[2]) for ep in config.robot_endpoints],
+            initial_robot_ids=config.robot_ids,
             send_hz=config.send_hz,
             invert_right_wheel=config.invert_right_wheel,
         )
@@ -187,8 +210,9 @@ class RealPushEnv(Environment):
         print("[RealPushEnv] Closed.")
 
     # Robot management
-    def add_robot(self, robot_id: int, ip: str, port: int = 9001) -> None:
-        self._action_sender.add_robot(robot_id, ip, port)
+    def add_robot(self, robot_id: int) -> None:
+        """Registers a new robot ID (IP/Port no longer required)."""
+        self._action_sender.add_robot(robot_id)
         if robot_id not in self._workspace_config.car_id_list:
             self._workspace_config.car_id_list.append(robot_id)
 

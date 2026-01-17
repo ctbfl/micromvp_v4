@@ -50,6 +50,8 @@ class ObserverConfig:
     fps: int = 60
     undistort: bool = False
 
+    marker_center_to_wheel_center_offset_cm: list = (0.0, 1.1)  # (x_cm, y_cm), we want observer to give back wheel center, not marker position
+
     # Calibration
     calibration_file: str = "/home/omen/junshan/micromvp_push/camera/config/camera.yaml"
 
@@ -58,7 +60,7 @@ class ObserverConfig:
     car_dict: str = "DICT_4X4_50"
 
     # Marker size
-    car_marker_size_mm: float = 36.0
+    car_marker_size_mm: float = 27.0
 
     # Workspace pose estimation
     ws_reproj_err_px: float = 5.0
@@ -72,6 +74,7 @@ class ObserverConfig:
     preview_window_name: str = "ArucoObserver"
     draw_axis: bool = True
     axis_length_m: float = 0.03
+
 
 
 @dataclass
@@ -402,8 +405,8 @@ class ArucoObserver:
 
             observations[car_id] = CarObservation(
                 car_id=car_id,
-                x_cm=float(center_cm[0]),
-                y_cm=float(center_cm[1]),
+                x_cm=float(center_cm[0])+self._config.marker_center_to_wheel_center_offset_cm[0],
+                y_cm=float(center_cm[1])+self._config.marker_center_to_wheel_center_offset_cm[1],
                 yaw_deg=float(yaw_deg),
                 timestamp=timestamp,
             )
