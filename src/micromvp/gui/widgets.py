@@ -1,7 +1,7 @@
 """
 Custom control widgets for the MicroMVP GUI control panel.
 
-Supports: Label, Toggle, Discrete Slider, Continuous Slider, Options (Dropdown), Input
+Supports: Label, Toggle, Discrete Slider, Continuous Slider, Options (Dropdown), Input, Button, DynamicLabel
 """
 
 from typing import Any, Callable, List, Optional
@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -236,6 +237,77 @@ class InputWidget(QWidget):
         self._callback = callback
 
 
+class ButtonWidget(QWidget):
+    """Button widget that triggers callback on click."""
+
+    def __init__(
+        self,
+        label: str,
+        callback: Optional[Callable[[], None]] = None,
+        parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent)
+        self._callback = callback
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 4)
+
+        self._button = QPushButton(label)
+        self._button.clicked.connect(self._on_clicked)
+        layout.addWidget(self._button)
+
+    def _on_clicked(self) -> None:
+        if self._callback:
+            self._callback()
+
+    def set_callback(self, callback: Callable[[], None]) -> None:
+        self._callback = callback
+
+
+class DynamicLabelWidget(QWidget):
+    """
+    Dynamic label widget with bold title and updatable text area.
+
+    This widget receives updates FROM the coordinator (not GUI -> Coordinator).
+    Use set_text() to update the displayed text.
+    """
+
+    def __init__(
+        self,
+        title: str,
+        default: str = "",
+        parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(2)
+
+        # Bold title
+        self._title_label = QLabel(title)
+        self._title_label.setStyleSheet("font-weight: bold; color: #333;")
+        layout.addWidget(self._title_label)
+
+        # Normal font text area
+        self._text_label = QLabel(default)
+        self._text_label.setStyleSheet("color: #0066cc;")
+        self._text_label.setWordWrap(True)
+        layout.addWidget(self._text_label)
+
+    def set_text(self, text: str) -> None:
+        """Update the displayed text."""
+        self._text_label.setText(text)
+
+    def get_text(self) -> str:
+        """Get the current displayed text."""
+        return self._text_label.text()
+
+    def set_callback(self, _callback: Callable) -> None:
+        """No-op for compatibility. DynamicLabelWidget doesn't use callbacks."""
+        pass
+
+
 def create_widget_from_config(config: dict) -> tuple[QWidget, Optional[str]]:
     """
     Factory function to create a widget from configuration dict.
@@ -283,6 +355,20 @@ def create_widget_from_config(config: dict) -> tuple[QWidget, Optional[str]]:
             label=config.get("label", ""),
             placeholder=config.get("placeholder", ""),
         ), callback_name
+
+    elif widget_type == "button":
+        return ButtonWidget(
+            label=config.get("label", "Button"),
+        ), callback_name
+
+    elif widget_type == "dynamic_label":
+        # For dynamic_label, use widget_name for identification (not callback_name)
+        # since this widget receives updates from coordinator, not sends to it
+        widget_name = config.get("widget_name")
+        return DynamicLabelWidget(
+            title=config.get("title", ""),
+            default=config.get("default", ""),
+        ), widget_name
 
     else:
         # Unknown widget type, return empty label

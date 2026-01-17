@@ -48,6 +48,17 @@ class KeyboardSignalEmitter(QObject):
     key_released = pyqtSignal(str)
 
 
+class WidgetTextSignalEmitter(QObject):
+    """
+    Helper class to emit widget text update signals from non-GUI threads.
+
+    Qt requires GUI updates to happen on the main thread.
+    This class provides a signal-based bridge for thread-safe widget updates.
+    """
+
+    text_update_requested = pyqtSignal(str, str)  # widget_name, text
+
+
 class MVPWindow(QMainWindow):
     """
     Main MicroMVP GUI Window.
@@ -94,6 +105,10 @@ class MVPWindow(QMainWindow):
         self._keyboard_emitter = KeyboardSignalEmitter()
         self._keyboard_emitter.key_pressed.connect(self._on_key_press)
         self._keyboard_emitter.key_released.connect(self._on_key_release)
+
+        # Widget text update mechanism (thread-safe)
+        self._widget_text_emitter = WidgetTextSignalEmitter()
+        self._widget_text_emitter.text_update_requested.connect(self._handle_widget_text_update)
 
         # Setup UI
         self._setup_window()
@@ -371,6 +386,26 @@ class MVPWindow(QMainWindow):
         self._selected_car_id = car_id
         if car_id in self._car_states:
             self._sidebar.update_inspector(self._car_states[car_id])
+
+    # -------------------------------------------------------------------------
+    # Widget Text Update API (Thread-Safe)
+    # -------------------------------------------------------------------------
+
+    def update_widget_text(self, widget_name: str, text: str) -> None:
+        """
+        Update the text of a DynamicLabelWidget.
+
+        This method is thread-safe and can be called from the logic thread.
+
+        Args:
+            widget_name: Name of the widget (from config's widget_name)
+            text: New text to display
+        """
+        self._widget_text_emitter.text_update_requested.emit(widget_name, text)
+
+    def _handle_widget_text_update(self, widget_name: str, text: str) -> None:
+        """Handle widget text update on the main thread."""
+        self._sidebar.update_widget_text(widget_name, text)
 
     # -------------------------------------------------------------------------
     # Main Loop

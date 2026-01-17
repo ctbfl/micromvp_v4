@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
 
 from micromvp.core.models import CarState
 
-from .widgets import create_widget_from_config
+from .widgets import DynamicLabelWidget, create_widget_from_config
 
 
 class ControlPanel(QScrollArea):
@@ -37,6 +37,7 @@ class ControlPanel(QScrollArea):
         super().__init__(parent)
         self._config = config
         self._widgets: Dict[str, QWidget] = {}  # callback_name -> widget
+        self._dynamic_labels: Dict[str, DynamicLabelWidget] = {}  # widget_name -> DynamicLabelWidget
 
         # Scroll area setup
         self.setWidgetResizable(True)
@@ -52,11 +53,15 @@ class ControlPanel(QScrollArea):
 
         # Build widgets from config
         for item_config in config:
-            widget, callback_name = create_widget_from_config(item_config)
+            widget, name = create_widget_from_config(item_config)
             layout.addWidget(widget)
 
-            if callback_name:
-                self._widgets[callback_name] = widget
+            # Store widget by name for callback binding or text updates
+            if name:
+                if isinstance(widget, DynamicLabelWidget):
+                    self._dynamic_labels[name] = widget
+                else:
+                    self._widgets[name] = widget
 
         layout.addStretch()
         self.setWidget(container)
@@ -76,6 +81,23 @@ class ControlPanel(QScrollArea):
             widget.set_callback(func)
             return True
 
+        return False
+
+    def update_widget_text(self, widget_name: str, text: str) -> bool:
+        """
+        Update the text of a DynamicLabelWidget.
+
+        Args:
+            widget_name: Name of the widget (from config's widget_name)
+            text: New text to display
+
+        Returns:
+            True if widget was updated successfully, False if widget not found.
+        """
+        widget = self._dynamic_labels.get(widget_name)
+        if widget:
+            widget.set_text(text)
+            return True
         return False
 
 
@@ -292,3 +314,16 @@ class Sidebar(QWidget):
     def clear_inspector(self) -> None:
         """Clear the car inspector."""
         self._car_inspector.clear()
+
+    def update_widget_text(self, widget_name: str, text: str) -> bool:
+        """
+        Update the text of a DynamicLabelWidget.
+
+        Args:
+            widget_name: Name of the widget (from config's widget_name)
+            text: New text to display
+
+        Returns:
+            True if widget was updated successfully, False if widget not found.
+        """
+        return self._control_panel.update_widget_text(widget_name, text)

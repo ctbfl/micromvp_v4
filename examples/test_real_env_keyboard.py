@@ -162,6 +162,8 @@ def main():
 
                 # Update GUI
                 car_states = {s.car_id: s for s in coordinator.gather_car_state()}
+                # print("car_states", car_states, flush=True)
+
                 drawings = coordinator.get_additional_drawings()
                 gui.update(car_states, drawings)
 

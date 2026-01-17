@@ -28,10 +28,10 @@ class RealPushConfig:
     height: float = WORKSPACE_H_CM
 
     # Car geometry (cm)
-    car_width: float = 4.2
-    car_height: float = 5.4
-    offset_w: float = 2.1
-    offset_h: float = 4.1
+    car_width: float = 4.8
+    car_height: float = 5.2
+    offset_w: float = 2.4
+    offset_h: float = 2.6
 
     # Dynamics (cm/s)
     wheel_base: float = 4.2
@@ -51,8 +51,8 @@ class RealPushConfig:
     # Observer settings
     workspace_dict: str = "DICT_5X5_50"
     car_dict: str = "DICT_4X4_50"
-    car_marker_size_mm: float = 27.0
-    marker_center_to_wheel_center_offset_cm: list = (0.0, 1.1)
+    car_marker_size_mm: float = 36.0
+    marker_center_to_wheel_center_offset_cm: list = (0.0, 0.0)
     warmup_frames: int = 30
 
     # The ONLY preview option you want

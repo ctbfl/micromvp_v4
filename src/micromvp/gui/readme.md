@@ -69,6 +69,21 @@ Configure widgets via a list of dicts in `gui_config["control_panel"]`:
 {"type": "label", "text": "=== Section Header ==="}
 ```
 
+#### Dynamic Label (display only)
+```python
+ {
+    "type": "dynamic_label", 
+    "title": "Status",
+    "widget_name": "status_display",
+    "default": "Ready"
+  }  
+```
+Can be updated via:s
+```
+gui.update_widget_text("status_display", "Processing...")
+```
+
+
 #### Toggle (checkbox)
 ```python
 {

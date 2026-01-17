@@ -6,12 +6,14 @@ Provides controller interfaces for robot control:
 - WASDController: Keyboard-driven manual control
 - FollowPathController: Pure pursuit path following
 - TargetFollowController: Follow a moving target point
+- NavigationController: Path following with in-place rotation
 """
 
 from .base import Controller
 from .WASD_controller import WASDController, WASDInput
 from .follow_path_controller import FollowPathController
 from .target_follow_controller import TargetFollowController
+from .navigation_controller import NavigationController, NavigationState
 
 __all__ = [
     "Controller",
@@ -19,4 +21,6 @@ __all__ = [
     "WASDInput",
     "FollowPathController",
     "TargetFollowController",
+    "NavigationController",
+    "NavigationState",
 ]
