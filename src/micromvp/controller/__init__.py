@@ -11,7 +11,7 @@ Provides controller interfaces for robot control:
 
 from .base import Controller
 from .WASD_controller import WASDController, WASDInput
-from .follow_path_controller import FollowPathController
+from .follow_path_controller import PurePursuitFollowPathController, StanleyFollowPathController, PurePursuit_PD_FollowPathController
 from .target_follow_controller import TargetFollowController
 from .navigation_controller import NavigationController, NavigationState
 
@@ -19,7 +19,9 @@ __all__ = [
     "Controller",
     "WASDController",
     "WASDInput",
-    "FollowPathController",
+    "PurePursuitFollowPathController",
+    "StanleyFollowPathController",
+    "PurePursuit_PD_FollowPathController",
     "TargetFollowController",
     "NavigationController",
     "NavigationState",

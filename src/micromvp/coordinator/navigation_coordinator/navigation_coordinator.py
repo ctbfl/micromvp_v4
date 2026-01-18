@@ -72,6 +72,7 @@ class NavigationCoordinator(Coordinator):
         active_robot_id: Optional[int] = None,
         webserver_port: int = 8080,
         robot_geometry: Optional[List[Tuple[float, float]]] = None,
+        robot_geometry_scale: float = 1.3,
     ) -> None:
         """
         Initialize navigation coordinator.
@@ -84,6 +85,9 @@ class NavigationCoordinator(Coordinator):
             webserver_port: Port for the web server API (default: 8080)
             robot_geometry: Robot shape as list of (x,y) vertices for RVG
                            Default is a rectangle based on car dimensions
+            robot_geometry_scale: Scale factor for robot geometry (default: 1.0)
+                                 Use >1.0 (e.g., 1.2) for more conservative paths
+                                 that keep larger distance from obstacles
         """
         super().__init__(ws_config, controllers)
 
@@ -103,8 +107,17 @@ class NavigationCoordinator(Coordinator):
         self._external_command_active = False
         self._external_path: Optional[List[Point]] = None
 
-        # Robot geometry for RVG solver
-        self._robot_geometry = robot_geometry or self._default_robot_geometry()
+        # Robot geometry for RVG solver (with optional scaling)
+        self._robot_geometry_scale = robot_geometry_scale
+        base_geometry = robot_geometry or self._default_robot_geometry()
+        # Apply scale to robot geometry for more conservative path planning
+        if robot_geometry_scale != 1.0:
+            self._robot_geometry = [
+                (x * robot_geometry_scale, y * robot_geometry_scale)
+                for x, y in base_geometry
+            ]
+        else:
+            self._robot_geometry = base_geometry
 
         # Web server
         self._webserver_port = webserver_port
@@ -124,6 +137,10 @@ class NavigationCoordinator(Coordinator):
 
         # Minimum distance to trigger pre-rotation (skip if already very close to path start)
         self._pre_rotation_min_distance = max(ws_config.car_width, ws_config.car_height) * 0.5
+
+        # Path interpolation settings
+        # Maximum distance between consecutive path points (smaller = denser path)
+        self._max_point_spacing = max(ws_config.car_width, ws_config.car_height) * 0.1
 
         # Start web server
         self._start_webserver()
@@ -329,6 +346,19 @@ class NavigationCoordinator(Coordinator):
             start_v = vertex(start[0], start[1], 0, 2 * np.pi, 0)
             goal_v = vertex(goal[0], goal[1], 0, 2 * np.pi, 0)
 
+            # Check if start and goal are legal configurations before calling shortestPath
+            # This prevents C++ runtime_error that would crash the program
+            layers = solver.getLayers()
+            if layers:
+                # Check against first layer (any layer should work for position check)
+                layer = layers[0]
+                if not layer.legalConfig(start_v):
+                    print(f"[NavigationCoordinator] Start position ({start[0]:.2f}, {start[1]:.2f}) is not legal (too close to obstacle/border), using direct path")
+                    return [start[:2], goal[:2]]
+                if not layer.legalConfig(goal_v):
+                    print(f"[NavigationCoordinator] Goal position ({goal[0]:.2f}, {goal[1]:.2f}) is not legal (too close to obstacle/border), using direct path")
+                    return [start[:2], goal[:2]]
+
             # Find shortest path
             path_result = solver.shortestPath(start_v, goal_v)
 
@@ -346,6 +376,59 @@ class NavigationCoordinator(Coordinator):
             print(f"[NavigationCoordinator] Path planning error: {e}")
             # Fall back to direct path
             return [start[:2], goal[:2]]
+
+    def _interpolate_path(
+        self,
+        path: List[Point],
+        max_spacing: Optional[float] = None
+    ) -> List[Point]:
+        """
+        Interpolate a sparse path to create a dense path with evenly spaced points.
+
+        Takes critical waypoints from RVG and adds intermediate points so that
+        consecutive points are no more than max_spacing apart. This is needed
+        for pure pursuit algorithm which requires dense points.
+
+        Args:
+            path: Sparse path as list of (x, y) critical points
+            max_spacing: Maximum distance between consecutive points.
+                        If None, uses self._max_point_spacing
+
+        Returns:
+            Dense path with interpolated points
+        """
+        if not path or len(path) < 2:
+            return path
+
+        if max_spacing is None:
+            max_spacing = self._max_point_spacing
+
+        dense_path: List[Point] = [path[0]]
+
+        for i in range(len(path) - 1):
+            p1 = path[i]
+            p2 = path[i + 1]
+
+            # Calculate distance between consecutive points
+            dx = p2[0] - p1[0]
+            dy = p2[1] - p1[1]
+            segment_length = math.sqrt(dx * dx + dy * dy)
+
+            if segment_length <= max_spacing:
+                # Segment is short enough, just add the endpoint
+                dense_path.append(p2)
+            else:
+                # Need to interpolate: calculate number of segments needed
+                num_segments = math.ceil(segment_length / max_spacing)
+
+                # Add intermediate points (excluding start point which is already added)
+                for j in range(1, num_segments + 1):
+                    t = j / num_segments
+                    interp_x = p1[0] + t * dx
+                    interp_y = p1[1] + t * dy
+                    dense_path.append((interp_x, interp_y))
+
+        return dense_path
 
     # -------------------------------------------------------------------------
     # GUI Callbacks
@@ -403,6 +486,55 @@ class NavigationCoordinator(Coordinator):
 
         # Start path with pre-rotation toward path start
         self._start_path_with_pre_rotation(points)
+
+    def on_canvas_click(self, x: float, y: float) -> None:
+        """
+        Handle canvas click event from GUI.
+
+        Plans a path from current position to clicked point using RVG solver,
+        interpolates it for pure pursuit, and sends to the controller.
+        No final rotation is applied (unlike api_goto).
+
+        GUI commands take priority over external web server commands.
+
+        Args:
+            x: Target x position (workspace coordinates)
+            y: Target y position (workspace coordinates)
+        """
+        # GUI takes priority - clear external command and pending path
+        self._external_command_active = False
+        self._external_path = None
+        self._clear_pending_path()
+
+        controller = self._get_active_controller()
+        if controller is None:
+            return
+
+        # Get current position
+        current_x = controller.car_state.x
+        current_y = controller.car_state.y
+        current_theta = controller.car_state.theta
+
+        # Plan path using RVG
+        with self._obstacles_lock:
+            obstacles_copy = list(self._obstacles)
+
+        path = self._plan_path(
+            (current_x, current_y, current_theta),
+            (x, y, 0),  # theta=0 for goal (not used since no final rotation)
+            obstacles_copy
+        )
+
+        if path is None or len(path) < 2:
+            # Planning failed or trivial path, go direct
+            path = [(current_x, current_y), (x, y)]
+
+        # Set display path (show the original critical points path)
+        self._set_display_path(path)
+
+        # Start path with pre-rotation toward path start
+        # Note: no goto_theta passed, so no final rotation will be applied
+        self._start_path_with_pre_rotation(path)
 
     def on_key_press(self, key: str) -> None:
         """
@@ -502,10 +634,14 @@ class NavigationCoordinator(Coordinator):
         goto_theta: Optional[float] = None
     ) -> bool:
         """
-        Start path following with pre-rotation toward path start.
+        Start path following with pre-rotation toward the first waypoint.
 
-        First rotates the robot to face the first point of the path,
+        First rotates the robot to face the first target waypoint of the path,
         then starts following the path after rotation completes.
+
+        Handles two cases:
+        1. RVG/click-to-go paths: path[0] is current position, path[1] is first waypoint
+        2. Hand-drawn curves: path[0] is already the first waypoint to go to
 
         Args:
             path: List of (x, y) waypoints
@@ -521,32 +657,62 @@ class NavigationCoordinator(Coordinator):
         # Get current position
         current_x = controller.car_state.x
         current_y = controller.car_state.y
+        current_theta = controller.car_state.theta
 
-        # Calculate distance and angle to first path point
+        # Determine the first actual waypoint to navigate to
+        # If path[0] is very close to current position, it's the start point (RVG path)
+        # and we should look at path[1] for the first target waypoint
         first_point = path[0]
         dx = first_point[0] - current_x
         dy = first_point[1] - current_y
+        dist_to_first = math.sqrt(dx * dx + dy * dy)
+
+        if dist_to_first < self._pre_rotation_min_distance and len(path) > 1:
+            # path[0] is current position, use path[1] as target waypoint
+            target_point = path[1]
+        else:
+            # path[0] is already the first waypoint (hand-drawn curve)
+            target_point = first_point
+
+        # Calculate distance and angle to target waypoint
+        dx = target_point[0] - current_x
+        dy = target_point[1] - current_y
         distance = math.sqrt(dx * dx + dy * dy)
 
-        # If very close to path start, skip pre-rotation
+        # If very close to target, skip pre-rotation and start path following
         if distance < self._pre_rotation_min_distance:
-            # Start path following directly
-            controller.set_path(path)
+            dense_path = self._interpolate_path(path)
+            controller.set_path(dense_path)
             if goto_theta is not None:
                 controller._car_state.metadata["goto_target_theta"] = goto_theta
             return False
 
-        # Calculate angle to first point
+        # Calculate angle to target waypoint
         target_angle = math.degrees(math.atan2(dy, dx))
         if target_angle < 0:
             target_angle += 360
 
-        # Store pending path
+        # Check if we need to rotate (heading differs significantly from target direction)
+        heading_error = target_angle - current_theta
+        while heading_error > 180:
+            heading_error -= 360
+        while heading_error < -180:
+            heading_error += 360
+
+        # If heading is already close enough (within 45 degrees), skip pre-rotation
+        if abs(heading_error) < 45:
+            dense_path = self._interpolate_path(path)
+            controller.set_path(dense_path)
+            if goto_theta is not None:
+                controller._car_state.metadata["goto_target_theta"] = goto_theta
+            return False
+
+        # Store pending path for after rotation completes
         with self._pending_path_lock:
             self._pending_path = path
             self._pending_goto_theta = goto_theta
 
-        # Start rotation toward path start
+        # Start rotation toward first waypoint
         controller.rotate_to(target_angle)
         return True
 
@@ -573,9 +739,10 @@ class NavigationCoordinator(Coordinator):
                 self._pending_path = None
                 self._pending_goto_theta = None
 
-                # Cancel rotation state and start path
+                # Cancel rotation state and start path with interpolated dense path
                 controller.cancel_rotation()
-                controller.set_path(path)
+                dense_path = self._interpolate_path(path)
+                controller.set_path(dense_path)
                 if goto_theta is not None:
                     controller._car_state.metadata["goto_target_theta"] = goto_theta
 

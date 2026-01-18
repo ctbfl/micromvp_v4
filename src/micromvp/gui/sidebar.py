@@ -100,7 +100,6 @@ class ControlPanel(QScrollArea):
             return True
         return False
 
-
 class CarInspector(QGroupBox):
     """
     Panel displaying detailed information about the selected car.
@@ -115,6 +114,7 @@ class CarInspector(QGroupBox):
         self._current_car_id: Optional[int] = None
 
         # metadata layout bookkeeping
+        # 缓存当前的元数据键列表，用于检测结构是否变化
         self._metadata_keys: Tuple[str, ...] = ()
         self._metadata_value_labels: Dict[str, QLabel] = {}
 
@@ -181,7 +181,8 @@ class CarInspector(QGroupBox):
         self.setTitle("Car Inspector")
 
     def update_state(self, state: CarState) -> None:
-        car_changed = (self._current_car_id is None) or (self._current_car_id != state.car_id)
+        # 1. 检测车辆 ID 是否变更
+        car_id_changed = (self._current_car_id is None) or (self._current_car_id != state.car_id)
         self._current_car_id = state.car_id
         self.setTitle(f"Car Inspector - #{state.car_id}")
 
@@ -194,26 +195,37 @@ class CarInspector(QGroupBox):
         self._fields["angular_velocity"].setText(f"{state.angular_velocity:.3f}")
         self._fields["status_label"].setText(state.status_label)
 
-        # Build metadata rows only when selecting a new car
-        if car_changed:
-            self._build_metadata_schema(state.metadata)
+        # 2. 获取当前帧的元数据 Keys
+        # 注意：这里我们获取 Keys 并转换为 tuple 以便比较
+        # 如果你希望忽略顺序变化，可以使用 sorted(state.metadata.keys())
+        # 但通常保持插入顺序在 UI 上展示更直观
+        current_metadata_keys = tuple(state.metadata.keys())
 
-        # Update metadata values only (no flashing keys)
+        # 3. 检测元数据结构是否变更 (ID 变了 或者 Keys 变了)
+        metadata_structure_changed = (current_metadata_keys != self._metadata_keys)
+
+        # 4. 如果 ID 变了 或者 结构变了，重新构建 UI
+        if car_id_changed or metadata_structure_changed:
+            self._build_metadata_schema(state.metadata)
+        
+        # 5. 更新元数据数值
+        # 此时 self._metadata_keys 已经是最新的了（由 _build_metadata_schema 更新）
+        # 我们可以安全地遍历并更新
         for key in self._metadata_keys:
             value = state.metadata.get(key, None)
-            self._metadata_value_labels[key].setText(self._format_value(value))
+            # 防御性编程：以防万一构建和更新之间发生极罕见的并发问题（在单线程Qt中通常不会）
+            if key in self._metadata_value_labels:
+                self._metadata_value_labels[key].setText(self._format_value(value))
 
     def _build_metadata_schema(self, metadata: Dict[str, Any]) -> None:
         """
-        Rebuild metadata rows once when a new car is selected.
-        Assumption: for a given car, keys are stable afterwards.
+        Rebuild metadata rows.
+        Called when car ID changes OR when metadata keys structure changes.
         """
         self._clear_metadata_rows()
 
+        # Update the cached keys
         keys = list(metadata.keys())
-        # keep original insertion order from dict; if you prefer stable sort, uncomment:
-        # keys = sorted(keys)
-
         self._metadata_keys = tuple(keys)
         self._metadata_value_labels = {}
 
@@ -256,7 +268,6 @@ class CarInspector(QGroupBox):
     @property
     def current_car_id(self) -> Optional[int]:
         return self._current_car_id
-
 
 class Sidebar(QWidget):
     MIN_WIDTH = 250

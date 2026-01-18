@@ -58,6 +58,10 @@ def main():
         default="/home/omen/junshan/micromvp_push/micromvp_v4/src/micromvp/env/real_push_env/camera.yaml",
         help="Camera calibration file path"
     )
+    parser.add_argument(
+        "--max-speed", type=float, default=0.5,
+        help="Initial robot speed [0-1] (default: 0.5)"
+    )
     args = parser.parse_args()
 
     # Parse robot IDs
@@ -98,7 +102,7 @@ def main():
 
     # Create controllers for each robot
     controllers = {
-        robot_id: WASDController(robot_id, ws_config)
+        robot_id: WASDController(robot_id, ws_config, max_speed=args.max_speed)
         for robot_id in ws_config.car_id_list
     }
 
@@ -117,6 +121,14 @@ def main():
             {"type": "label", "text": "WASD: Move robot"},
             {"type": "label", "text": "Tab: Next robot"},
             {"type": "label", "text": "Space: Stop all"},
+            {"type": "label", "text": ""},
+            {
+                "type": "continuous_slider",
+                "label": "Robot Speed",
+                "range": [0.0, 1.0],
+                "default": args.max_speed,
+                "callback_name": "set_robot_speed",
+            },
             {"type": "label", "text": ""},
             {"type": "label", "text": f"Robots: {len(robot_ids)}"},
         ],
@@ -139,6 +151,7 @@ def main():
     gui.register_callback("on_key_release", coordinator.on_key_release)
     gui.register_callback("on_car_click", coordinator.on_car_click)
     gui.register_callback("on_canvas_click", handle_canvas_click)
+    gui.register_callback("set_robot_speed", coordinator.set_speed)
 
     # ============================================================
     # KEY FIX: Shared state between threads

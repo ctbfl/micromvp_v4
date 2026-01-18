@@ -166,6 +166,12 @@ def main():
                 "placeholder": "0-359.99",
                 "callback_name": "set_rotation_target",
             },
+            {
+                "type": "dynamic_label", 
+                "title": "AP Status",
+                "widget_name": "ap_status_display",
+                "default": "N/A"
+            },
             {"type": "label", "text": ""},
             {"type": "label", "text": "=== Web API ==="},
             {"type": "label", "text": f"Port: {args.port}"},
@@ -200,6 +206,7 @@ def main():
     gui.register_callback("on_curve_drawn", coordinator.on_curve_drawn)
     gui.register_callback("set_robot_speed", coordinator.on_speed_change)
     gui.register_callback("set_rotation_target", coordinator.on_rotation_input)
+    gui.register_callback("on_canvas_click", coordinator.on_canvas_click)
 
     # Shared state between threads
     latest_observations = {}
@@ -212,6 +219,7 @@ def main():
 
             # Get observations and process
             observations = env.observe()
+
 
             # Only process if we have observations
             if observations:
@@ -266,6 +274,8 @@ def main():
             obs = latest_observations.copy() if latest_observations else {}
 
         if obs:
+            micromvp_ap_status = env.get_micromvp_ap_status()
+            gui.update_widget_text("ap_status_display", micromvp_ap_status)
             car_states = {s.car_id: s for s in coordinator.gather_car_state()}
             drawings = coordinator.get_additional_drawings()
             gui.update(car_states, drawings)

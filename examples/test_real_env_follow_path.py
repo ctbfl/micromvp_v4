@@ -26,7 +26,7 @@ import argparse
 
 from micromvp.gui import MVPWindow
 from micromvp.env import RealPushEnv, RealPushConfig
-from micromvp.controller import FollowPathController
+from micromvp.controller import PurePursuitFollowPathController
 from micromvp.coordinator import FollowPathCoordinator
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
@@ -102,7 +102,7 @@ def main():
 
     # Create path-following controllers for each robot
     controllers = {
-        robot_id: FollowPathController(
+        robot_id: PurePursuitFollowPathController(
             robot_id,
             ws_config,
             lookahead_distance=args.lookahead,

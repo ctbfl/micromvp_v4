@@ -15,8 +15,11 @@ from __future__ import annotations
 from typing import Dict, List, Set, Any, Optional, Tuple
 
 from micromvp.controller.base import Controller
-from micromvp.controller.follow_path_controller import FollowPathController
+from micromvp.controller.follow_path_controller import PurePursuitFollowPathController, StanleyFollowPathController, PurePursuit_PD_FollowPathController
 from micromvp.coordinator.base import Coordinator
+
+# Type alias for path-following controllers
+FollowPathController = (PurePursuitFollowPathController, StanleyFollowPathController, PurePursuit_PD_FollowPathController)
 from micromvp.core.models import (
     Action,
     CarState,

@@ -31,7 +31,7 @@ class SerialActionConfig:
     # 串口配置
     port: str = "/dev/ttyACM0"
     baudrate: int = 115200
-    
+
     # 发送频率 (Hz)
     send_hz: float = 30.0
 
@@ -43,6 +43,15 @@ class SerialActionConfig:
     initial_robot_ids: List[int] = field(default_factory=list)
 
 
+@dataclass
+class APStatusInfo:
+    """AP status information parsed from serial output."""
+    is_connected: bool = False
+    alive_robot_ids: List[int] = field(default_factory=list)
+    recent_events: List[str] = field(default_factory=list)  # Max 10 events
+    last_update_time: float = 0.0
+
+
 class SerialActionSender:
     """
     Serial-based action sender.
@@ -52,7 +61,7 @@ class SerialActionSender:
     def __init__(self, config: SerialActionConfig) -> None:
         self._config = config
         self._running = False
-        
+
         # 串口对象
         self._ser: Optional[serial.Serial] = None
         self._serial_lock = threading.Lock()  # 保护串口写入，防止多线程冲突
@@ -62,14 +71,21 @@ class SerialActionSender:
         self._actions: Dict[int, Action] = {}
         # 追踪活跃的 Robot ID (替代原来的 Endpoint 列表)
         self._active_robot_ids: set = set(config.initial_robot_ids)
-        
-        self._action_lock = threading.Lock() # 保护 _actions 字典
+
+        self._action_lock = threading.Lock()  # 保护 _actions 字典
 
         # 全局序列号 (所有机器人共用一个时间轴)
         self._global_seq: int = 0
 
         # 后台线程
         self._thread: Optional[threading.Thread] = None
+
+        # AP status monitoring
+        self._ap_status = APStatusInfo()
+        self._status_lock = threading.Lock()
+        self._reader_thread: Optional[threading.Thread] = None
+        self._pending_alive_ids: List[int] = []  # Collects IDs until STATUS line
+        self._previous_alive_ids: set = set()  # Track previous alive IDs for connect/disconnect events
 
     def start(self) -> bool:
         """Start the serial connection and sender thread."""
@@ -89,9 +105,19 @@ class SerialActionSender:
             return False
 
         self._running = True
+
+        # Mark AP as connected
+        with self._status_lock:
+            self._ap_status.is_connected = True
+
+        # Start sender thread
         self._thread = threading.Thread(target=self._send_loop, daemon=True)
         self._thread.start()
-        
+
+        # Start reader thread for AP status monitoring
+        self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self._reader_thread.start()
+
         print(f"[SerialSender] Started at {self._config.send_hz} Hz")
         return True
 
@@ -102,9 +128,15 @@ class SerialActionSender:
 
         self._running = False
 
+        # Stop sender thread
         if self._thread is not None:
             self._thread.join(timeout=1.0)
             self._thread = None
+
+        # Stop reader thread
+        if self._reader_thread is not None:
+            self._reader_thread.join(timeout=1.0)
+            self._reader_thread = None
 
         # 发送全停指令
         self.stop_all()
@@ -115,7 +147,11 @@ class SerialActionSender:
             except Exception:
                 pass
             self._ser = None
-        
+
+        # Mark AP as disconnected
+        with self._status_lock:
+            self._ap_status.is_connected = False
+
         print("[SerialSender] Stopped")
 
     def set_action(self, robot_id: int, action: Action) -> None:
@@ -169,6 +205,101 @@ class SerialActionSender:
         with self._action_lock:
             self._active_robot_ids.discard(robot_id)
             self._actions.pop(robot_id, None)
+
+    def get_ap_status(self) -> APStatusInfo:
+        """Get current AP status (thread-safe copy)."""
+        with self._status_lock:
+            return APStatusInfo(
+                is_connected=self._ap_status.is_connected,
+                alive_robot_ids=list(self._ap_status.alive_robot_ids),
+                recent_events=list(self._ap_status.recent_events),
+                last_update_time=self._ap_status.last_update_time,
+            )
+
+    # -------------------------------------------------------------------------
+    # Internal - AP Status Reader
+    # -------------------------------------------------------------------------
+
+    def _reader_loop(self) -> None:
+        """Background thread that reads and parses AP status from serial."""
+        while self._running:
+            if self._ser is None or not self._ser.is_open:
+                time.sleep(0.1)
+                continue
+
+            try:
+                # Read line with short timeout (set in Serial init)
+                line_bytes = self._ser.readline()
+                if not line_bytes:
+                    continue
+
+                line = line_bytes.decode("utf-8", errors="ignore").strip()
+                if not line:
+                    continue
+
+                self._parse_status_line(line)
+
+            except serial.SerialException:
+                # Serial disconnected or error
+                time.sleep(0.1)
+            except Exception:
+                # Ignore parsing errors
+                pass
+
+    def _parse_status_line(self, line: str) -> None:
+        """Parse a status line from Arduino AP."""
+        if line.startswith("[ALIVE]"):
+            # [ALIVE] id=X ip=A.B.C.D last=Ums rxHello=N
+            # Extract robot ID and add to pending list
+            try:
+                # Parse id=X
+                parts = line.split()
+                for part in parts:
+                    if part.startswith("id="):
+                        robot_id = int(part[3:])
+                        if robot_id not in self._pending_alive_ids:
+                            self._pending_alive_ids.append(robot_id)
+                        break
+            except (ValueError, IndexError):
+                pass
+
+        elif line.startswith("[STATUS]"):
+            # [STATUS] stations=X hello=N serFrames=M udpTx=P cksumBad=Q drop=R notReg=S
+            # This signals end of ALIVE list, update status
+            current_ids = set(self._pending_alive_ids)
+
+            # Detect newly connected cars
+            new_connections = current_ids - self._previous_alive_ids
+            # Detect disconnected cars
+            disconnections = self._previous_alive_ids - current_ids
+
+            with self._status_lock:
+                # Add connection events
+                for robot_id in sorted(new_connections):
+                    self._add_event(f"[INFO] Car {robot_id} connected")
+
+                # Add disconnection events
+                for robot_id in sorted(disconnections):
+                    self._add_event(f"[INFO] Car {robot_id} disconnected")
+
+                self._ap_status.alive_robot_ids = sorted(self._pending_alive_ids)
+                self._ap_status.last_update_time = time.time()
+
+            # Update previous IDs for next comparison
+            self._previous_alive_ids = current_ids
+            self._pending_alive_ids = []
+
+        elif line.startswith("[WARN]") or line.startswith("[ERR]"):
+            # Add to recent events
+            with self._status_lock:
+                self._add_event(line)
+
+    def _add_event(self, event: str) -> None:
+        """Add an event to the recent events list. Must be called with _status_lock held."""
+        self._ap_status.recent_events.append(event)
+        # Keep only last 10 events
+        if len(self._ap_status.recent_events) > 10:
+            self._ap_status.recent_events = self._ap_status.recent_events[-10:]
 
     # -------------------------------------------------------------------------
     # Internal - Protocol Implementation

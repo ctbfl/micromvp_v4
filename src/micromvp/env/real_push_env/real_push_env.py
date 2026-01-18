@@ -220,3 +220,27 @@ class RealPushEnv(Environment):
         self._action_sender.remove_robot(robot_id)
         if robot_id in self._workspace_config.car_id_list:
             self._workspace_config.car_id_list.remove(robot_id)
+
+    def get_micromvp_ap_status(self) -> str:
+        """Get formatted AP status string for GUI display."""
+        ap_status = self._action_sender.get_ap_status()
+
+        # Determine status string
+        if not ap_status.is_connected:
+            status_str = "disconnected"
+        elif time.time() - ap_status.last_update_time > 3.0:
+            status_str = "no response"
+        else:
+            status_str = "normal"
+
+        # Format connected cars
+        if ap_status.alive_robot_ids:
+            cars_str = ",".join(str(id) for id in sorted(ap_status.alive_robot_ids))
+        else:
+            cars_str = "none"
+
+        # Format recent events (last 3)
+        events = ap_status.recent_events[-3:] if ap_status.recent_events else []
+        events_str = "\n".join(f"- {e}" for e in events) if events else "- (none)"
+
+        return f"Status: {status_str}\nConnected cars: {cars_str}\nRecent 3 events:\n{events_str}"

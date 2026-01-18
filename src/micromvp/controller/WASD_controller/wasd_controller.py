@@ -82,17 +82,24 @@ class WASDController(Controller):
     - "BACKWARD_RIGHT": S+D pressed
     """
 
-    def __init__(self, robot_id: int, ws_config: WorkspaceConfig) -> None:
+    def __init__(
+        self,
+        robot_id: int,
+        ws_config: WorkspaceConfig,
+        max_speed: float = 1.0,
+    ) -> None:
         """
         Initialize WASD controller.
 
         Args:
             robot_id: The ID of the robot this controller manages
             ws_config: Workspace configuration from environment
+            max_speed: Maximum speed multiplier [0.0, 1.0] (default: 1.0)
         """
         super().__init__(robot_id, ws_config)
         self._wasd_input = WASDInput()
         self._prev_timestamp: Optional[float] = None
+        self._max_speed = max(0.0, min(1.0, max_speed))
 
     def step(self, observation: RobotObservation) -> Action:
         """
@@ -152,6 +159,16 @@ class WASDController(Controller):
         self._prev_timestamp = observation.timestamp
         self._last_observation = observation
 
+    @property
+    def max_speed(self) -> float:
+        """Get current maximum speed multiplier."""
+        return self._max_speed
+
+    @max_speed.setter
+    def max_speed(self, value: float) -> None:
+        """Set maximum speed multiplier [0.0, 1.0]."""
+        self._max_speed = max(0.0, min(1.0, value))
+
     def calculate_action(self) -> Action:
         """
         Calculate action based on current WASD input.
@@ -196,9 +213,9 @@ class WASDController(Controller):
             left_speed += 1.0
             right_speed -= 1.0
 
-        # Clamp to [-1, 1]
-        left_speed = max(-1.0, min(1.0, left_speed))
-        right_speed = max(-1.0, min(1.0, right_speed))
+        # Clamp to [-1, 1] and scale by max_speed
+        left_speed = max(-1.0, min(1.0, left_speed)) * self._max_speed
+        right_speed = max(-1.0, min(1.0, right_speed)) * self._max_speed
 
         # Update status label
         self._update_status_label(wasd)

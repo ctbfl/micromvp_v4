@@ -26,7 +26,7 @@ from micromvp.core.models import (
 Point = Tuple[float, float]
 
 
-class FollowPathController(Controller):
+class PurePursuitFollowPathController(Controller):
     """
     Pure pursuit path following controller.
 

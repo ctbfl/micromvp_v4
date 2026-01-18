@@ -288,6 +288,17 @@ class KeyboardCoordinator(Coordinator):
                 controller.clear_input()
             controller.stop()
 
+    def set_speed(self, speed: float) -> None:
+        """
+        Set speed for all WASD controllers.
+
+        Args:
+            speed: Speed multiplier [0.0, 1.0]
+        """
+        for controller in self._controllers.values():
+            if isinstance(controller, WASDController):
+                controller.max_speed = speed
+
     def reset(self) -> None:
         """Reset coordinator and all controllers."""
         self._pressed_keys.clear()
