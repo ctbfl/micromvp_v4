@@ -72,7 +72,7 @@ class NavigationCoordinator(Coordinator):
         active_robot_id: Optional[int] = None,
         webserver_port: int = 8080,
         robot_geometry: Optional[List[Tuple[float, float]]] = None,
-        robot_geometry_scale: float = 1.3,
+        robot_geometry_scale: float = 1.1,
     ) -> None:
         """
         Initialize navigation coordinator.

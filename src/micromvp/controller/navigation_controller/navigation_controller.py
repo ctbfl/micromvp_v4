@@ -1,12 +1,30 @@
 """
-Navigation Controller - Path following with in-place rotation support.
+Navigation Controller (v2) - Pure Pursuit + CTE-PD path following
+with in-place rotation support.
 
-This controller extends path following with:
-1. Pure pursuit path following (same as FollowPathController)
-2. In-place rotation to align with target orientation (new)
+What’s new vs your old NavigationController:
+- Path following upgraded to PurePursuit + Cross-Track-Error PD controller
+- Path resampling (max gap <= max_point_gap_ratio * car_size)
+- Prefix arc-length + no-skip forward window gating (prevents jumping at self-intersections)
+- Optional rotate-in-place capture when far from path + facing away (during ACQUIRE)
+- Keeps your original public API shape:
+    - set_path(path)
+    - clear_path()
+    - rotate_to(theta, on_done=None)
+    - cancel_rotation()
+    - step(observation) -> Action
+    - reset()
+    - set_speed(speed)
 
-The rotation function slowly rotates the robot in-place until it aligns
-with the target orientation (within +-5 degrees) and holds stable for 0.5 seconds.
+Rotation behavior stays the same:
+- Rotates in-place until |error| <= ROTATION_TOLERANCE_DEG
+- Must remain stable for ROTATION_STABLE_TIME seconds
+
+Axis convention:
+- X: right
+- Y: up
+- 0 deg: +X
+- deg increases CCW (+Y is 90 deg)
 """
 from __future__ import annotations
 
@@ -22,12 +40,46 @@ from micromvp.core.models import (
     WorkspaceConfig,
 )
 
-
 Point = Tuple[float, float]
 
 
+# ---------------------------
+# Utils
+# ---------------------------
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return lo if x < lo else hi if x > hi else x
+
+
+def _wrap_to_pi(rad: float) -> float:
+    while rad > math.pi:
+        rad -= 2.0 * math.pi
+    while rad <= -math.pi:
+        rad += 2.0 * math.pi
+    return rad
+
+
+def _project_point_to_segment(p: Point, a: Point, b: Point) -> Tuple[Point, float]:
+    ax, ay = a
+    bx, by = b
+    px, py = p
+
+    vx = bx - ax
+    vy = by - ay
+    denom = vx * vx + vy * vy
+    if denom <= 1e-12:
+        return a, 0.0
+
+    t = ((px - ax) * vx + (py - ay) * vy) / denom
+    t = _clamp(t, 0.0, 1.0)
+    return (ax + t * vx, ay + t * vy), t
+
+
+# ---------------------------
+# Navigation state machine
+# ---------------------------
+
 class NavigationState(Enum):
-    """Navigation controller states."""
     IDLE = auto()
     FOLLOWING = auto()
     FINISHED_PATH = auto()
@@ -38,31 +90,24 @@ class NavigationState(Enum):
 
 class NavigationController(Controller):
     """
-    Navigation controller with path following and in-place rotation.
-
-    This controller follows paths using pure pursuit and can rotate
-    in-place to align with a target orientation.
+    Navigation controller with:
+    1) Pure Pursuit + CTE-PD follow path (no-skip arc-length gated)
+    2) In-place rotation to target orientation (stable-hold completion)
 
     Status labels:
-    - "IDLE": No task assigned
-    - "FOLLOWING": Actively following path
-    - "FINISHED": Reached end of path
-    - "ROTATING": Rotating in-place to target orientation
-    - "ROTATION_STABLE": Aligned and holding stable
-    - "ROTATION_DONE": Rotation completed successfully
-
-    Usage:
-        controller = NavigationController(robot_id, ws_config)
-        controller.set_path([(x1,y1), (x2,y2), ...])  # Follow path
-        controller.rotate_to(45.0)  # Rotate to 45 degrees
-        action = controller.step(observation)
+    - "IDLE"
+    - "FOLLOWING"
+    - "FINISHED"
+    - "ROTATING"
+    - "ROTATION_STABLE"
+    - "ROTATION_DONE"
     """
 
-    # Rotation parameters
-    ROTATION_TOLERANCE_DEG = 2.5  # +-5 degrees tolerance
-    ROTATION_STABLE_TIME = 0.5   # 0.5 seconds stable requirement
-    ROTATION_SPEED_MAX = 0.25    # Maximum rotation speed
-    ROTATION_SPEED_MIN = 0.15    # Minimum rotation speed (must overcome motor deadzone)
+    # -------- Rotation parameters --------
+    ROTATION_TOLERANCE_DEG = 2.5    # within +-2.5 deg
+    ROTATION_STABLE_TIME = 0.5      # seconds in tolerance to finish
+    ROTATION_SPEED_MAX = 0.25
+    ROTATION_SPEED_MIN = 0.15
 
     def __init__(
         self,
@@ -71,84 +116,166 @@ class NavigationController(Controller):
         lookahead_distance: Optional[float] = None,
         max_speed: float = 0.3,
         goal_tolerance: Optional[float] = None,
+        # ---- PP+PD knobs (car_size-based, unit-insensitive) ----
+        max_point_gap_ratio: float = 0.01,
+        no_skip_ratio: float = 0.5,
     ) -> None:
-        """
-        Initialize navigation controller.
-
-        Args:
-            robot_id: The ID of the robot this controller manages
-            ws_config: Workspace configuration from environment
-            lookahead_distance: Distance to look ahead on path (default: 1.5 * car_size)
-            max_speed: Maximum normalized wheel speed [0, 1] (default: 0.3)
-            goal_tolerance: Distance to consider goal reached (default: 0.5 * car_size)
-        """
         super().__init__(robot_id, ws_config)
 
-        # Pure pursuit parameters
-        car_size = max(ws_config.car_width, ws_config.car_height)
-        self._lookahead_distance = lookahead_distance or (1.5 * car_size)
+        self.car_size = max(ws_config.car_width, ws_config.car_height)
+
+        # Path-following params
+        self._max_point_gap_ratio = max(1e-4, float(max_point_gap_ratio))
+        self._no_skip_ratio = max(0.1, float(no_skip_ratio))
+
+        self._lookahead_distance = lookahead_distance or (0.5 * self.car_size)
         self._max_speed = min(1.0, max(0.0, max_speed))
-        self._goal_tolerance = goal_tolerance or (0.5 * car_size)
+        self._goal_tolerance = goal_tolerance or (0.2 * self.car_size)
+
+        # CTE-PD knobs
+        self._cte_dot_alpha = 0.25
+        self._min_turn_factor = 0.25
 
         # Path state
+        self._path_raw: List[Point] = []
         self._path: List[Point] = []
+        self._path_s: List[float] = []   # prefix arc-length
         self._path_index: int = 0
+
+        # Timestamp/velocity bookkeeping
         self._prev_timestamp: Optional[float] = None
+
+        # PD state
+        self._prev_cte: Optional[float] = None
+        self._prev_cte_time: Optional[float] = None
+        self._cte_dot_filt: float = 0.0
 
         # Rotation state
         self._target_theta: Optional[float] = None
         self._rotation_stable_start: Optional[float] = None
-        self._nav_state = NavigationState.IDLE
-
-        # Callback for rotation completion
         self._on_rotation_done_callback: Optional[callable] = None
+
+        # Nav state
+        self._nav_state = NavigationState.IDLE
+        self._car_state.status_label = "IDLE"
+
+        # ---- ALIGN behavior ----
+        self._align_enter_deg = 60.0
+        self._align_exit_deg = 45.0   # 滞回：进入60，退出45（更稳），你也可以改成同为60
+        self._align_active = False
+
+        # ---- deadband ----
+        self._wheel_deadband = 0.05
+
+    # ---------------------------
+    # Properties
+    # ---------------------------
 
     @property
     def path(self) -> List[Point]:
-        """Get the current path."""
         return self._path.copy()
 
     @property
     def path_index(self) -> int:
-        """Get the current path index (progress along path)."""
         return self._path_index
 
     @property
     def lookahead_distance(self) -> float:
-        """Get the lookahead distance."""
         return self._lookahead_distance
 
     @property
     def max_speed(self) -> float:
-        """Get the maximum speed."""
         return self._max_speed
 
     @property
     def is_following_path(self) -> bool:
-        """Check if currently following a path."""
         return self._nav_state == NavigationState.FOLLOWING
 
     @property
     def is_rotating(self) -> bool:
-        """Check if currently rotating."""
         return self._nav_state in (NavigationState.ROTATING, NavigationState.ROTATION_STABLE)
 
     @property
     def is_busy(self) -> bool:
-        """Check if controller is busy with any task."""
-        return self._nav_state not in (NavigationState.IDLE, NavigationState.FINISHED_PATH, NavigationState.ROTATION_DONE)
+        return self._nav_state not in (
+            NavigationState.IDLE,
+            NavigationState.FINISHED_PATH,
+            NavigationState.ROTATION_DONE,
+        )
+
+    # ---------------------------
+    # Path preprocessing
+    # ---------------------------
+
+    def _resample_path(self, path: List[Point], max_step: float) -> List[Point]:
+        if len(path) <= 1:
+            return list(path)
+
+        out: List[Point] = []
+        for i in range(len(path) - 1):
+            x0, y0 = path[i]
+            x1, y1 = path[i + 1]
+            dx = x1 - x0
+            dy = y1 - y0
+            d = math.hypot(dx, dy)
+
+            if d < 1e-12:
+                continue
+
+            n = int(math.ceil(d / max_step))
+
+            if not out:
+                out.append((x0, y0))
+
+            for k in range(1, n + 1):
+                t = k / n
+                out.append((x0 + t * dx, y0 + t * dy))
+
+        return out
+
+    def _build_prefix_s(self) -> None:
+        self._path_s = [0.0]
+        for i in range(len(self._path) - 1):
+            x0, y0 = self._path[i]
+            x1, y1 = self._path[i + 1]
+            self._path_s.append(self._path_s[-1] + math.hypot(x1 - x0, y1 - y0))
+
+    def _max_reachable_index(self, start_idx: int) -> int:
+        if not self._path_s:
+            return start_idx
+
+        start_idx = int(_clamp(float(start_idx), 0.0, float(len(self._path_s) - 1)))
+        s0 = self._path_s[start_idx]
+        s_max = s0 + self._no_skip_ratio * self.car_size
+
+        j = start_idx
+        n = len(self._path_s)
+        while j + 1 < n and self._path_s[j + 1] <= s_max:
+            j += 1
+        return j
+
+    # ---------------------------
+    # Public API
+    # ---------------------------
 
     def set_path(self, path: List[Point]) -> None:
-        """
-        Set a new path to follow.
-
-        Args:
-            path: List of (x, y) points defining the path
-        """
-        self._path = list(path)
-        self._path_index = 0
+        # cancel rotation if any
         self._target_theta = None
         self._rotation_stable_start = None
+        self._on_rotation_done_callback = None
+        self._car_state.metadata.pop("target_theta", None)
+
+        self.car_size = max(self._ws_config.car_width, self._ws_config.car_height)
+
+        self._path_raw = list(path)
+        max_step = self._max_point_gap_ratio * self.car_size
+        self._path = self._resample_path(self._path_raw, max_step)
+        self._build_prefix_s()
+
+        self._path_index = 0
+        self._prev_cte = None
+        self._prev_cte_time = None
+        self._cte_dot_filt = 0.0
 
         if self._path:
             self._nav_state = NavigationState.FOLLOWING
@@ -161,94 +288,84 @@ class NavigationController(Controller):
             self._car_state.metadata.pop("path", None)
             self._car_state.metadata.pop("path_index", None)
 
+        self._car_state.metadata.pop("target_point", None)
+
     def clear_path(self) -> None:
-        """Clear the current path and stop."""
+        self._path_raw = []
         self._path = []
+        self._path_s = []
         self._path_index = 0
-        self._nav_state = NavigationState.IDLE
-        self._car_state.status_label = "IDLE"
+
+        self._prev_cte = None
+        self._prev_cte_time = None
+        self._cte_dot_filt = 0.0
+
+        if self._nav_state not in (NavigationState.ROTATING, NavigationState.ROTATION_STABLE):
+            self._nav_state = NavigationState.IDLE
+            self._car_state.status_label = "IDLE"
+
         self._car_state.metadata.pop("path", None)
         self._car_state.metadata.pop("path_index", None)
         self._car_state.metadata.pop("target_point", None)
 
-    def rotate_to(
-        self,
-        target_theta: float,
-        on_done: Optional[callable] = None
-    ) -> None:
-        """
-        Start in-place rotation to target orientation.
-
-        The robot will slowly rotate until it aligns with the target
-        (within +-5 degrees) and holds stable for 0.5 seconds.
-
-        Args:
-            target_theta: Target orientation in degrees [0, 360)
-            on_done: Optional callback when rotation completes
-        """
-        # Normalize to [0, 360)
+    def rotate_to(self, target_theta: float, on_done: Optional[callable] = None) -> None:
+        # Normalize [0, 360)
         self._target_theta = target_theta % 360.0
         self._rotation_stable_start = None
         self._on_rotation_done_callback = on_done
 
-        # Clear any existing path
+        # clear path task
+        self._path_raw = []
         self._path = []
+        self._path_s = []
         self._path_index = 0
-
-        self._nav_state = NavigationState.ROTATING
-        self._car_state.status_label = "ROTATING"
-        self._car_state.metadata["target_theta"] = self._target_theta
         self._car_state.metadata.pop("path", None)
         self._car_state.metadata.pop("path_index", None)
         self._car_state.metadata.pop("target_point", None)
 
+        # reset PD state
+        self._prev_cte = None
+        self._prev_cte_time = None
+        self._cte_dot_filt = 0.0
+
+        self._nav_state = NavigationState.ROTATING
+        self._car_state.status_label = "ROTATING"
+        self._car_state.metadata["target_theta"] = self._target_theta
+
     def cancel_rotation(self) -> None:
-        """Cancel current rotation and go to idle."""
         self._target_theta = None
         self._rotation_stable_start = None
         self._on_rotation_done_callback = None
-        self._nav_state = NavigationState.IDLE
-        self._car_state.status_label = "IDLE"
+
+        if self._path:
+            self._nav_state = NavigationState.FOLLOWING
+            self._car_state.status_label = "FOLLOWING"
+        else:
+            self._nav_state = NavigationState.IDLE
+            self._car_state.status_label = "IDLE"
+
         self._car_state.metadata.pop("target_theta", None)
 
     def step(self, observation: RobotObservation) -> Action:
-        """
-        Process one control step.
-
-        Args:
-            observation: Current observation from environment
-
-        Returns:
-            Action based on current task (path following or rotation)
-        """
         self.update(observation)
         return self.calculate_action()
 
     def update(self, observation: RobotObservation) -> None:
-        """
-        Update internal CarState from observation.
-
-        Args:
-            observation: Current observation from environment
-        """
-        # Store for velocity estimation
         prev_x = self._car_state.x
         prev_y = self._car_state.y
         prev_theta = self._car_state.theta
         prev_time = self._prev_timestamp
 
-        # Update position from observation
         self._car_state.x = observation.x
         self._car_state.y = observation.y
-        self._car_state.theta = observation.theta
+        self._car_state.theta = observation.theta  # degrees
 
-        # Estimate velocities if we have previous data
         if prev_time is not None and observation.timestamp > prev_time:
             dt = observation.timestamp - prev_time
             if dt > 0:
                 dx = observation.x - prev_x
                 dy = observation.y - prev_y
-                distance = math.sqrt(dx * dx + dy * dy)
+                distance = math.hypot(dx, dy)
                 self._car_state.linear_velocity = distance / dt
 
                 dtheta = observation.theta - prev_theta
@@ -261,278 +378,440 @@ class NavigationController(Controller):
         self._prev_timestamp = observation.timestamp
         self._last_observation = observation
 
-    def calculate_action(self) -> Action:
-        """
-        Calculate action based on current state.
+    # ---------------------------
+    # Main dispatch
+    # ---------------------------
 
-        Returns:
-            Action with wheel speeds
-        """
-        if self._nav_state == NavigationState.ROTATING:
+    def calculate_action(self) -> Action:
+        if self._nav_state in (NavigationState.ROTATING, NavigationState.ROTATION_STABLE):
             return self._calculate_rotation_action()
-        elif self._nav_state == NavigationState.ROTATION_STABLE:
-            return self._calculate_rotation_action()
-        elif self._nav_state == NavigationState.FOLLOWING:
+
+        if self._nav_state == NavigationState.FOLLOWING:
             return self._calculate_path_action()
-        else:
-            return Action.stop()
+
+        return Action.stop()
+
+    # ---------------------------
+    # Rotation control
+    # ---------------------------
 
     def _calculate_rotation_action(self) -> Action:
-        """
-        Calculate action for in-place rotation.
-
-        Returns:
-            Action with wheel speeds for rotation
-        """
         if self._target_theta is None:
             self._nav_state = NavigationState.IDLE
             self._car_state.status_label = "IDLE"
+            self._car_state.metadata.pop("target_theta", None)
             return Action.stop()
 
         current_theta = self._car_state.theta
-
-        # Calculate angle error
         error = self._target_theta - current_theta
 
-        # Normalize to [-180, 180]
         while error > 180:
             error -= 360
         while error < -180:
             error += 360
 
-        # Check if within tolerance
         if abs(error) <= self.ROTATION_TOLERANCE_DEG:
-            # Within tolerance - check stability
-            current_time = time.time()
+            now = time.time()
 
             if self._rotation_stable_start is None:
-                # Just entered tolerance zone
-                self._rotation_stable_start = current_time
+                self._rotation_stable_start = now
                 self._nav_state = NavigationState.ROTATION_STABLE
                 self._car_state.status_label = "ROTATION_STABLE"
 
-            elif current_time - self._rotation_stable_start >= self.ROTATION_STABLE_TIME:
-                # Stable for required duration - rotation complete
+            elif now - self._rotation_stable_start >= self.ROTATION_STABLE_TIME:
                 self._nav_state = NavigationState.ROTATION_DONE
                 self._car_state.status_label = "ROTATION_DONE"
                 self._car_state.metadata.pop("target_theta", None)
 
-                # Call completion callback if set
                 if self._on_rotation_done_callback:
-                    callback = self._on_rotation_done_callback
+                    cb = self._on_rotation_done_callback
                     self._on_rotation_done_callback = None
-                    callback()
+                    cb()
 
                 return Action.stop()
 
-            # Still waiting for stability time - hold position
             return Action.stop()
 
+        self._rotation_stable_start = None
+        self._nav_state = NavigationState.ROTATING
+        self._car_state.status_label = "ROTATING"
+
+        abs_error = abs(error)
+        if abs_error > 45.0:
+            speed = self.ROTATION_SPEED_MAX
+        elif abs_error > 15.0:
+            t = (abs_error - 15.0) / 30.0
+            speed = self.ROTATION_SPEED_MIN + t * (self.ROTATION_SPEED_MAX - self.ROTATION_SPEED_MIN)
         else:
-            # Outside tolerance - need to rotate
-            self._rotation_stable_start = None
-            self._nav_state = NavigationState.ROTATING
-            self._car_state.status_label = "ROTATING"
+            speed = self.ROTATION_SPEED_MIN
 
-            # Determine rotation direction and speed
-            # Positive error means turn counter-clockwise (left wheel back, right wheel forward)
-            # Negative error means turn clockwise (left wheel forward, right wheel back)
+        if error > 0:
+            return Action(left_speed=-speed, right_speed=speed)
+        return Action(left_speed=speed, right_speed=-speed)
 
-            # Scale speed based on error magnitude
-            # Use higher speed for large errors, but always maintain minimum speed
-            # to overcome motor deadzone/friction
-            abs_error = abs(error)
-            if abs_error > 45.0:
-                # Large error: use max speed
-                speed = self.ROTATION_SPEED_MAX
-            elif abs_error > 15.0:
-                # Medium error: interpolate between min and max
-                t = (abs_error - 15.0) / 30.0  # 0 at 15°, 1 at 45°
-                speed = self.ROTATION_SPEED_MIN + t * (self.ROTATION_SPEED_MAX - self.ROTATION_SPEED_MIN)
-            else:
-                # Small error (5-15°): use minimum speed to ensure movement
-                speed = self.ROTATION_SPEED_MIN
+    def _enforce_deadband_scale(self, vl: float, vr: float) -> Tuple[float, float]:
+        db = self._wheel_deadband
 
-            if error > 0:
-                # Turn counter-clockwise (positive rotation)
-                return Action(left_speed=-speed, right_speed=speed)
-            else:
-                # Turn clockwise (negative rotation)
-                return Action(left_speed=speed, right_speed=-speed)
+        max_abs = max(abs(vl), abs(vr))
+
+        # 都非常小：认为就是停
+        if max_abs < 1e-6:
+            return 0.0, 0.0
+
+        # 如果已经有一个轮子 >= db，直接返回
+        if max_abs >= db:
+            return vl, vr
+
+        # 需要动但都没过deadband：整体缩放
+        scale = db / max_abs
+        vl2 = vl * scale
+        vr2 = vr * scale
+
+        # 仍然保证在 [-1,1]
+        m2 = max(abs(vl2), abs(vr2))
+        if m2 > 1.0:
+            s2 = 1.0 / m2
+            vl2 *= s2
+            vr2 *= s2
+
+        return vl2, vr2
+
+
+    # ---------------------------
+    # Path control (Pure Pursuit + CTE-PD)
+    # ---------------------------
 
     def _calculate_path_action(self) -> Action:
-        """
-        Calculate action using pure pursuit algorithm.
-
-        Returns:
-            Action with wheel speeds to follow the path
-        """
-        # No path -> stop
         if not self._path:
             self._nav_state = NavigationState.IDLE
             self._car_state.status_label = "IDLE"
             return Action.stop()
 
-        # Get current position
         robot_x = self._car_state.x
         robot_y = self._car_state.y
-        robot_theta = self._car_state.theta
+        robot_theta = self._car_state.theta  # degrees
 
-        # Check if we've reached the end of the path
+        self.car_size = max(self._ws_config.car_width, self._ws_config.car_height)
+        wheel_base = self._ws_config.wheel_base
+
         final_point = self._path[-1]
-        dist_to_goal = math.sqrt(
-            (robot_x - final_point[0]) ** 2 + (robot_y - final_point[1]) ** 2
-        )
+        dist_to_goal = math.hypot(robot_x - final_point[0], robot_y - final_point[1])
         if dist_to_goal < self._goal_tolerance:
             self._nav_state = NavigationState.FINISHED_PATH
             self._car_state.status_label = "FINISHED"
             self._car_state.metadata.pop("target_point", None)
             return Action.stop()
 
-        # Find target point using pure pursuit
         target_point = self._find_target_point(robot_x, robot_y)
         if target_point is None:
             target_point = final_point
 
-        self._car_state.metadata["target_point"] = target_point
-        self._car_state.metadata["path_index"] = self._path_index
-        self._car_state.status_label = "FOLLOWING"
+        ref_point, theta_ref_rad, cte_raw, seg_idx = self._find_closest_reference((robot_x, robot_y))
+        self._path_index = max(self._path_index, seg_idx)
 
-        # Calculate steering using pure pursuit geometry
-        return self._calculate_pursuit_action(
+        curvature_pp, heading_error_rad, dist_to_target = self._pure_pursuit_curvature(
             robot_x, robot_y, robot_theta, target_point
         )
 
-    def _find_target_point(self, robot_x: float, robot_y: float) -> Optional[Point]:
-        """
-        Find the target point on the path using pure pursuit.
+        heading_deg = abs(math.degrees(heading_error_rad))
 
-        Args:
-            robot_x: Robot x position
-            robot_y: Robot y position
+        # ALIGN hysteresis, when angle difference is too much, rotate in place
+        if self._align_active:
+            if heading_deg <= self._align_exit_deg:
+                self._align_active = False
+        else:
+            if heading_deg >= self._align_enter_deg:
+                self._align_active = True
 
-        Returns:
-            Target point (x, y) or None if path is exhausted
-        """
-        if not self._path:
-            return None
+        if self._align_active:
+            # 原地转：用 heading_error 的符号决定方向
+            # 用 max_speed 来缩放一个角速度（你也可以改成常量）
+            w = 0.6 * self._max_speed
+            left_speed = -w if heading_error_rad > 0 else w
+            right_speed = w if heading_error_rad > 0 else -w
 
-        # Start searching from current index (never go backward)
-        best_idx = self._path_index
-        best_dist = float("inf")
+            # deadband缩放（你的规则）
+            left_speed, right_speed = self._enforce_deadband_scale(left_speed, right_speed)
 
-        # First, find the closest point from current index onward
-        for i in range(self._path_index, len(self._path)):
-            px, py = self._path[i]
-            dist = math.sqrt((robot_x - px) ** 2 + (robot_y - py) ** 2)
-            if dist < best_dist:
-                best_dist = dist
-                best_idx = i
+            self._car_state.metadata["mode"] = "ALIGN"
+            self._car_state.metadata["heading_error_deg"] = math.degrees(heading_error_rad)
+            self._car_state.metadata["target_point"] = target_point
+            self._car_state.status_label = "FOLLOWING"
+            self._nav_state = NavigationState.FOLLOWING
+            return Action(
+                left_speed=_clamp(left_speed, -1.0, 1.0),
+                right_speed=_clamp(right_speed, -1.0, 1.0),
+            )
 
-        # Update path index (only advance, never go back)
-        self._path_index = max(self._path_index, best_idx)
+        # normal PD following
+        # PD gating and scaling (car_size-based)
+        dist_to_path = abs(cte_raw)
 
-        # Now find the target point at lookahead distance
-        for i in range(self._path_index, len(self._path)):
-            px, py = self._path[i]
-            dist = math.sqrt((robot_x - px) ** 2 + (robot_y - py) ** 2)
-            if dist >= self._lookahead_distance:
-                self._path_index = i
-                return (px, py)
+        cte_pd_enable_dist = 2.5 * self.car_size
+        cte_clip = 1.0 * self.car_size
+        cte_deadband = 0.10 * self.car_size
 
-        # If no point is far enough, return the last point
-        if self._path:
-            return self._path[-1]
-        return None
+        curv_pd_max = 2.0 / max(self.car_size, 1e-9)
+        curvature_max = 3.5 / max(self.car_size, 1e-9)
 
-    def _calculate_pursuit_action(
-        self,
-        robot_x: float,
-        robot_y: float,
-        robot_theta: float,
-        target: Point,
-    ) -> Action:
-        """
-        Calculate wheel speeds using pure pursuit geometry.
+        rotate_in_place_rad = math.radians(110.0)
 
-        Args:
-            robot_x: Robot x position
-            robot_y: Robot y position
-            robot_theta: Robot orientation (degrees, 0 = +X)
-            target: Target point (x, y)
-
-        Returns:
-            Action with wheel speeds
-        """
-        # Calculate angle to target
-        dx = target[0] - robot_x
-        dy = target[1] - robot_y
-        distance = math.sqrt(dx * dx + dy * dy)
-
-        if distance < 1e-6:
-            return Action.stop()
-
-        # Angle to target in degrees (0 = +X direction)
-        angle_to_target = math.degrees(math.atan2(dy, dx))
-
-        # Calculate heading error
-        heading_error = angle_to_target - robot_theta
-
-        # Normalize to [-180, 180]
-        while heading_error > 180:
-            heading_error -= 360
-        while heading_error < -180:
-            heading_error += 360
-
-        # Pure pursuit curvature
-        alpha_rad = math.radians(heading_error)
-        curvature = 2.0 * math.sin(alpha_rad) / max(distance, self._lookahead_distance)
-
-        # Convert curvature to differential drive wheel speeds
-        wheel_base = self._ws_config.wheel_base
-
-        # Base forward speed (scaled by heading error)
-        turn_factor = max(0.3, math.cos(alpha_rad))
+        e01 = abs(heading_error_rad) / math.pi  # 0..1
+        turn_factor = 1.0 - 0.8 * e01           # 你可以调0.8这个斜率
+        turn_factor = _clamp(turn_factor, self._min_turn_factor, 1.0)
         base_speed = self._max_speed * turn_factor
 
-        # Calculate wheel speeds
-        diff = curvature * wheel_base / 2.0
+        use_pd = dist_to_path <= cte_pd_enable_dist
+
+        cte_used = cte_raw
+        if abs(cte_used) < cte_deadband:
+            cte_used = 0.0
+        cte_used = _clamp(cte_used, -cte_clip, cte_clip)
+
+        now_t = self._prev_timestamp
+        if (not use_pd) or (now_t is None):
+            self._prev_cte = None
+            self._prev_cte_time = None
+            self._cte_dot_filt = 0.0
+            cte_dot_filt = 0.0
+            cte_pd_curv = 0.0
+        else:
+            if self._prev_cte is None or self._prev_cte_time is None:
+                cte_dot = 0.0
+            else:
+                dt = now_t - self._prev_cte_time
+                cte_dot = (cte_used - self._prev_cte) / dt if dt > 1e-6 else 0.0
+
+            self._cte_dot_filt = (1.0 - self._cte_dot_alpha) * self._cte_dot_filt + self._cte_dot_alpha * cte_dot
+            cte_dot_filt = self._cte_dot_filt
+
+            self._prev_cte = cte_used
+            self._prev_cte_time = now_t
+
+            kp = 1.2
+            kd = 0.35
+
+            cte_n = cte_used / max(self.car_size, 1e-9)
+            cte_dot_n = cte_dot_filt / max(self.car_size, 1e-9)
+
+            cte_pd_curv = (kp * cte_n + kd * cte_dot_n) / max(self.car_size, 1e-9)
+            cte_pd_curv = _clamp(cte_pd_curv, -curv_pd_max, curv_pd_max)
+
+        curvature_cmd = curvature_pp + cte_pd_curv
+        curvature_cmd = _clamp(curvature_cmd, -curvature_max, curvature_max)
+
+        curv_slow = _clamp(1.0 - 0.65 * (abs(curvature_cmd) / max(curvature_max, 1e-9)), 0.35, 1.0)
+        base_speed *= curv_slow
+
+        # Acquire mode: far from path and facing away => rotate in place a bit
+        if (not use_pd) and (abs(heading_error_rad) > rotate_in_place_rad):
+            w = 0.6 * self._max_speed
+            left_speed = -w if heading_error_rad > 0 else w
+            right_speed = w if heading_error_rad > 0 else -w
+
+            self._car_state.metadata["mode"] = "ROTATE_IN_PLACE"
+            self._car_state.metadata["pd_enabled"] = False
+            self._car_state.metadata["cte"] = cte_raw
+            self._car_state.metadata["cte_used"] = cte_used
+            self._car_state.metadata["cte_dot_filt"] = 0.0
+            self._car_state.metadata["curvature_pp"] = curvature_pp
+            self._car_state.metadata["curvature_cmd"] = 0.0
+            self._car_state.metadata["heading_error_deg"] = math.degrees(heading_error_rad)
+            self._car_state.metadata["theta_ref_deg"] = math.degrees(theta_ref_rad)
+            self._car_state.metadata["ref_point"] = ref_point
+            self._car_state.metadata["dist_to_target"] = dist_to_target
+            self._car_state.metadata["goal_tol"] = self._goal_tolerance
+            self._car_state.metadata["no_skip_ratio"] = self._no_skip_ratio
+            self._car_state.metadata["max_point_gap_ratio"] = self._max_point_gap_ratio
+            self._car_state.metadata["cte_pd_enable_dist"] = cte_pd_enable_dist
+
+            self._car_state.metadata["target_point"] = target_point
+            self._car_state.metadata["path_index"] = self._path_index
+            self._car_state.status_label = "FOLLOWING"
+            self._nav_state = NavigationState.FOLLOWING
+
+            return Action(
+                left_speed=_clamp(left_speed, -1.0, 1.0),
+                right_speed=_clamp(right_speed, -1.0, 1.0),
+            )
+
+        diff = curvature_cmd * wheel_base / 2.0
         left_speed = base_speed * (1.0 - diff)
         right_speed = base_speed * (1.0 + diff)
 
-        # Normalize to keep within [-max_speed, max_speed]
         max_wheel = max(abs(left_speed), abs(right_speed))
         if max_wheel > self._max_speed:
             scale = self._max_speed / max_wheel
             left_speed *= scale
             right_speed *= scale
 
-        # Clamp to valid range
-        left_speed = max(-1.0, min(1.0, left_speed))
-        right_speed = max(-1.0, min(1.0, right_speed))
+        left_speed, right_speed = self._enforce_deadband_scale(left_speed, right_speed)
+
+        left_speed = _clamp(left_speed, -1.0, 1.0)
+        right_speed = _clamp(right_speed, -1.0, 1.0)
+
+        # Metadata
+        self._car_state.metadata["mode"] = "TRACK" if use_pd else "ACQUIRE"
+        self._car_state.metadata["pd_enabled"] = use_pd
+        self._car_state.metadata["cte"] = cte_raw
+        self._car_state.metadata["cte_used"] = cte_used
+        self._car_state.metadata["cte_dot_filt"] = cte_dot_filt if use_pd else 0.0
+        self._car_state.metadata["curvature_pp"] = curvature_pp
+        self._car_state.metadata["curvature_cmd"] = curvature_cmd
+        self._car_state.metadata["heading_error_deg"] = math.degrees(heading_error_rad)
+        self._car_state.metadata["theta_ref_deg"] = math.degrees(theta_ref_rad)
+        self._car_state.metadata["ref_point"] = ref_point
+        self._car_state.metadata["dist_to_target"] = dist_to_target
+        self._car_state.metadata["goal_tol"] = self._goal_tolerance
+        self._car_state.metadata["cte_pd_enable_dist"] = cte_pd_enable_dist
+        self._car_state.metadata["curvature_max"] = curvature_max
+        self._car_state.metadata["curv_pd_max"] = curv_pd_max
+        self._car_state.metadata["no_skip_ratio"] = self._no_skip_ratio
+        self._car_state.metadata["max_point_gap_ratio"] = self._max_point_gap_ratio
+
+        self._car_state.metadata["target_point"] = target_point
+        self._car_state.metadata["path_index"] = self._path_index
+
+        self._car_state.status_label = "FOLLOWING"
+        self._nav_state = NavigationState.FOLLOWING
 
         return Action(left_speed=left_speed, right_speed=right_speed)
 
+    # ---------------------------
+    # Gated target finding (no-skip)
+    # ---------------------------
+
+    def _find_target_point(self, robot_x: float, robot_y: float) -> Optional[Point]:
+        if not self._path:
+            return None
+
+        start = self._path_index
+        imax = self._max_reachable_index(start)
+
+        best_idx = start
+        best_dist = float("inf")
+
+        for i in range(start, imax + 1):
+            px, py = self._path[i]
+            dist = math.hypot(robot_x - px, robot_y - py)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = i
+
+        self._path_index = max(self._path_index, best_idx)
+
+        start = self._path_index
+        imax = self._max_reachable_index(start)
+
+        for i in range(start, imax + 1):
+            px, py = self._path[i]
+            dist = math.hypot(robot_x - px, robot_y - py)
+            if dist >= self._lookahead_distance:
+                self._path_index = i
+                return (px, py)
+
+        return self._path[min(imax, len(self._path) - 1)]
+
+    # ---------------------------
+    # Pure Pursuit curvature
+    # ---------------------------
+
+    def _pure_pursuit_curvature(
+        self,
+        robot_x: float,
+        robot_y: float,
+        robot_theta_deg: float,
+        target: Point,
+    ) -> Tuple[float, float, float]:
+        dx = target[0] - robot_x
+        dy = target[1] - robot_y
+        distance = math.hypot(dx, dy)
+        if distance < 1e-9:
+            return 0.0, 0.0, 0.0
+
+        angle_to_target = math.atan2(dy, dx)
+        robot_theta_rad = math.radians(robot_theta_deg)
+        heading_error_rad = _wrap_to_pi(angle_to_target - robot_theta_rad)
+
+        L = max(distance, self._lookahead_distance)
+        curvature_pp = 2.0 * math.sin(heading_error_rad) / L
+        return curvature_pp, heading_error_rad, distance
+
+    # ---------------------------
+    # Gated closest reference (no-skip) for CTE
+    # ---------------------------
+
+    def _find_closest_reference(self, pos: Point) -> Tuple[Point, float, float, int]:
+        x, y = pos
+        n = len(self._path)
+        if n == 1:
+            px, py = self._path[0]
+            theta_ref = math.radians(self._car_state.theta)
+            cte = math.hypot(x - px, y - py)
+            return (px, py), theta_ref, cte, 0
+
+        start_i = min(self._path_index, n - 2)
+        end_i = min(self._max_reachable_index(start_i), n - 1)
+        seg_end = max(start_i, min(end_i - 1, n - 2))
+
+        best_dist2 = float("inf")
+        best_proj: Point = self._path[start_i]
+        best_theta = 0.0
+        best_cte = 0.0
+        best_i = start_i
+
+        for i in range(start_i, seg_end + 1):
+            a = self._path[i]
+            b = self._path[i + 1]
+            proj, _t = _project_point_to_segment((x, y), a, b)
+
+            dxp = x - proj[0]
+            dyp = y - proj[1]
+            dist2 = dxp * dxp + dyp * dyp
+            if dist2 < best_dist2:
+                best_dist2 = dist2
+                best_proj = proj
+                best_i = i
+
+                seg_dx = b[0] - a[0]
+                seg_dy = b[1] - a[1]
+                theta_ref = math.atan2(seg_dy, seg_dx)
+                best_theta = theta_ref
+
+                nx = -math.sin(theta_ref)
+                ny = math.cos(theta_ref)
+                best_cte = nx * (x - proj[0]) + ny * (y - proj[1])
+
+        return best_proj, best_theta, best_cte, best_i
+
+    # ---------------------------
+    # Reset / speed
+    # ---------------------------
+
     def reset(self) -> None:
-        """Reset controller to initial state."""
         super().reset()
+
+        self._path_raw = []
         self._path = []
+        self._path_s = []
         self._path_index = 0
         self._prev_timestamp = None
+
+        self._prev_cte = None
+        self._prev_cte_time = None
+        self._cte_dot_filt = 0.0
+
         self._target_theta = None
         self._rotation_stable_start = None
         self._on_rotation_done_callback = None
+
         self._nav_state = NavigationState.IDLE
+        self._car_state.status_label = "IDLE"
+
         self._car_state.metadata.pop("path", None)
         self._car_state.metadata.pop("path_index", None)
         self._car_state.metadata.pop("target_point", None)
         self._car_state.metadata.pop("target_theta", None)
 
     def set_speed(self, speed: float) -> None:
-        """
-        Set max speed for path following.
-
-        Args:
-            speed: New maximum speed [0, 1]
-        """
         self._max_speed = max(0.0, min(1.0, speed))
