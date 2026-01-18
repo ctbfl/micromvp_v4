@@ -62,6 +62,10 @@ class RealPushConfig:
     send_hz: float = 60.0
     invert_right_wheel: bool = False
 
+    # Obstacle detection
+    obstacle_marker_config_file: str = ""  # Path to JSON, empty = disabled
+    obstacle_detection_interval_sec: float = 1.0
+
 # sample config ready to use:
 v3_config = RealPushConfig(
     car_width=4.8,
@@ -113,6 +117,8 @@ class RealPushEnv(Environment):
             warmup_frames=config.warmup_frames,
             no_preview=config.no_preview,
             marker_center_to_wheel_center_offset_cm=config.marker_center_to_wheel_center_offset_cm,
+            obstacle_marker_config_file=config.obstacle_marker_config_file,
+            obstacle_detection_interval_sec=config.obstacle_detection_interval_sec,
         )
         self._observer = ArucoObserver(obs_config)
 
@@ -170,6 +176,14 @@ class RealPushEnv(Environment):
                 timestamp=obs.timestamp,
             )
         return observations
+
+    def get_obstacles(self) -> list:
+        """Get detected obstacle polygons from ArUco 6x6 markers.
+
+        Returns:
+            List of obstacle polygons, each polygon is a list of (x, y) tuples in cm.
+        """
+        return self._observer.get_obstacles()
 
     def render(self) -> None:
         """

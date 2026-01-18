@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
+import json
 import cv2
 import numpy as np
 import yaml
@@ -75,6 +76,10 @@ class ObserverConfig:
     draw_axis: bool = True
     axis_length_m: float = 0.03
 
+    # Obstacle detection
+    obstacle_marker_config_file: str = ""  # Path to JSON, empty = disabled
+    obstacle_detection_interval_sec: float = 1.0
+
 
 
 @dataclass
@@ -131,6 +136,14 @@ class ArucoObserver:
 
         # Optional callback (IMPORTANT: do not touch Qt here!)
         self._frame_callback: Optional[Callable[[np.ndarray], None]] = None
+
+        # Obstacle detection
+        self._obstacle_detector: Optional[cv2.aruco.ArucoDetector] = None
+        self._obstacle_marker_len_m: float = 0.0
+        self._obstacle_marker_config: Dict[int, List[Tuple[float, float]]] = {}
+        self._last_obstacle_detection_time: float = 0.0
+        self._obstacle_polygons: List[List[Tuple[float, float]]] = []
+        self._obstacle_lock = threading.Lock()
 
     # -------------------------
     # Public APIs
@@ -201,6 +214,11 @@ class ArucoObserver:
     def is_workspace_ready(self) -> bool:
         return (self._rvec_ws is not None) and (self._tvec_ws is not None)
 
+    def get_obstacles(self) -> List[List[Tuple[float, float]]]:
+        """Get currently detected obstacle polygons in workspace coordinates (cm)."""
+        with self._obstacle_lock:
+            return [list(poly) for poly in self._obstacle_polygons]
+
     def render(self) -> None:
         """
         Preview rendering: MUST be called from GUI main thread (Qt main thread).
@@ -261,11 +279,41 @@ class ArucoObserver:
         size = tuple(calib["image_size"][:2])
         return K, D, size
 
+    def _load_obstacle_config(self, file_path: str) -> Tuple[float, Dict[int, List[Tuple[float, float]]]]:
+        """
+        Load obstacle marker configuration from JSON file.
+
+        Args:
+            file_path: Path to JSON config file
+
+        Returns:
+            Tuple of (marker_size_m, marker_config_dict)
+            marker_config_dict maps marker_id -> list of polygon points in local coords (cm)
+        """
+        with open(file_path, "r") as f:
+            config = json.load(f)
+
+        marker_size_m = config.get("marker_size_mm", 40.0) / 1000.0
+        markers = config.get("markers", {})
+
+        marker_config: Dict[int, List[Tuple[float, float]]] = {}
+        for marker_id_str, marker_def in markers.items():
+            try:
+                marker_id = int(marker_id_str)
+                polygon_local = marker_def.get("polygon_local", [])
+                if polygon_local:
+                    marker_config[marker_id] = [(pt[0], pt[1]) for pt in polygon_local]
+            except (ValueError, TypeError):
+                continue
+
+        return marker_size_m, marker_config
+
     def _setup_detectors(self) -> None:
         aruco = cv2.aruco
         dicts = {
             "DICT_4X4_50": aruco.DICT_4X4_50,
             "DICT_5X5_50": aruco.DICT_5X5_50,
+            "DICT_6X6_50": aruco.DICT_6X6_50,
         }
         ws_dict = aruco.getPredefinedDictionary(dicts.get(self._config.workspace_dict, aruco.DICT_5X5_50))
         car_dict = aruco.getPredefinedDictionary(dicts.get(self._config.car_dict, aruco.DICT_4X4_50))
@@ -273,6 +321,19 @@ class ArucoObserver:
         params.cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX
         self._ws_detector = aruco.ArucoDetector(ws_dict, params)
         self._car_detector = aruco.ArucoDetector(car_dict, params)
+
+        # Setup obstacle detector if config file is provided
+        if self._config.obstacle_marker_config_file:
+            try:
+                self._obstacle_marker_len_m, self._obstacle_marker_config = self._load_obstacle_config(
+                    self._config.obstacle_marker_config_file
+                )
+                obstacle_dict = aruco.getPredefinedDictionary(aruco.DICT_6X6_50)
+                self._obstacle_detector = aruco.ArucoDetector(obstacle_dict, params)
+                print(f"[ArucoObserver] Loaded obstacle config with {len(self._obstacle_marker_config)} markers")
+            except Exception as e:
+                print(f"[ArucoObserver] Failed to load obstacle config: {e}")
+                self._obstacle_detector = None
 
     def _marker_corners_in_marker_frame(self, marker_len_m: float) -> np.ndarray:
         h = marker_len_m / 2.0
@@ -426,6 +487,65 @@ class ArucoObserver:
         return observations
 
     # -------------------------
+    # Obstacle detection
+    # -------------------------
+    def _detect_obstacles(self, gray: np.ndarray) -> List[List[Tuple[float, float]]]:
+        """
+        Detect 6x6 ArUco markers and transform their polygons to workspace coordinates.
+
+        Args:
+            gray: Grayscale image
+
+        Returns:
+            List of obstacle polygons in workspace coordinates (cm)
+        """
+        if self._obstacle_detector is None or not self._obstacle_marker_config:
+            return []
+
+        obstacle_corners, obstacle_ids, _ = self._obstacle_detector.detectMarkers(gray)
+        if obstacle_ids is None or len(obstacle_ids) == 0:
+            return []
+
+        # Estimate pose for each detected obstacle marker
+        rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
+            obstacle_corners, self._obstacle_marker_len_m, self._K, self._D
+        )
+
+        detected_polygons: List[List[Tuple[float, float]]] = []
+
+        for i, mid in enumerate(obstacle_ids.flatten().tolist()):
+            marker_id = int(mid)
+            if marker_id not in self._obstacle_marker_config:
+                continue
+
+            # Get local polygon points (in cm)
+            polygon_local = self._obstacle_marker_config[marker_id]
+
+            # Get marker pose
+            rvec_marker = rvecs[i, 0, :]
+            tvec_marker = tvecs[i, 0, :].reshape(3, 1)
+            R_marker, _ = cv2.Rodrigues(rvec_marker)
+
+            # Transform polygon from marker-local to workspace coords
+            polygon_ws: List[Tuple[float, float]] = []
+            for pt_local_cm in polygon_local:
+                # Convert local coords from cm to meters
+                pt_local_m = np.array([pt_local_cm[0] / 100.0, pt_local_cm[1] / 100.0, 0.0], dtype=np.float32).reshape(3, 1)
+
+                # Transform: marker -> camera -> workspace
+                pt_cam = R_marker @ pt_local_m + tvec_marker
+                pt_ws_m = self._R_ws_cam @ pt_cam + self._t_ws_cam
+
+                # Convert back to cm
+                x_cm = float(pt_ws_m[0, 0]) * 100.0
+                y_cm = float(pt_ws_m[1, 0]) * 100.0
+                polygon_ws.append((x_cm, y_cm))
+
+            detected_polygons.append(polygon_ws)
+
+        return detected_polygons
+
+    # -------------------------
     # Background loop (NO HighGUI)
     # -------------------------
     def _run_loop(self) -> None:
@@ -460,6 +580,14 @@ class ArucoObserver:
                 observations = self._detect_cars(gray, vis)
                 with self._obs_lock:
                     self._observations = observations
+
+                # Obstacle detection at configured interval (default 1Hz)
+                current_time = time.time()
+                if current_time - self._last_obstacle_detection_time >= self._config.obstacle_detection_interval_sec:
+                    self._last_obstacle_detection_time = current_time
+                    detected = self._detect_obstacles(gray)
+                    with self._obstacle_lock:
+                        self._obstacle_polygons = detected
             else:
                 with self._obs_lock:
                     self._observations = {}

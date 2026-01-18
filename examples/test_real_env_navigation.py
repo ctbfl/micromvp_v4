@@ -98,6 +98,10 @@ def main():
         "--port", type=int, default=8080,
         help="Web server port (default: 8080)"
     )
+    parser.add_argument(
+        "--obstacle-config", type=str, default="",
+        help="Path to obstacle marker JSON config (for ArUco 6x6 obstacle detection)"
+    )
     args = parser.parse_args()
 
     robot_id = args.robot
@@ -111,6 +115,7 @@ def main():
         calibration_file=args.calib,
         warmup_frames=args.warmup,
         no_preview=args.no_preview,
+        obstacle_marker_config_file=args.obstacle_config,
     )
     env = RealPushEnv(config)
 
@@ -217,13 +222,13 @@ def main():
         while running:
             start_time = time.time()
 
-            # Get observations and process
+            # Get observations and obstacles
             observations = env.observe()
-
+            obstacles = env.get_obstacles()  # Get ArUco-detected obstacles
 
             # Only process if we have observations
             if observations:
-                actions = coordinator.process(observations)
+                actions = coordinator.process(observations, obstacles)  # Pass obstacles explicitly
                 env.apply_actions(actions)
 
                 # Update shared state for GUI thread

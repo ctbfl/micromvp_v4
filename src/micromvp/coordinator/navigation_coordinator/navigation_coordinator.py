@@ -99,9 +99,13 @@ class NavigationCoordinator(Coordinator):
         else:
             self._active_robot_id = None
 
-        # Obstacle storage for path planning
+        # Obstacle storage for path planning (web API obstacles)
         self._obstacles: List[List[Tuple[float, float]]] = []
         self._obstacles_lock = threading.Lock()
+
+        # ArUco-detected obstacles (passed from environment)
+        self._aruco_obstacles: List[List[Tuple[float, float]]] = []
+        self._aruco_obstacles_lock = threading.Lock()
 
         # External command tracking (for priority management)
         self._external_command_active = False
@@ -223,14 +227,13 @@ class NavigationCoordinator(Coordinator):
         current_y = controller.car_state.y
         current_theta = controller.car_state.theta
 
-        # Plan path using RVG
-        with self._obstacles_lock:
-            obstacles_copy = list(self._obstacles)
+        # Plan path using RVG with all obstacles (web API + ArUco)
+        all_obstacles = self._get_all_obstacles()
 
         path = self._plan_path(
             (current_x, current_y, current_theta),
             (x, y, theta),
-            obstacles_copy
+            all_obstacles
         )
 
         if path is None:
@@ -430,6 +433,14 @@ class NavigationCoordinator(Coordinator):
 
         return dense_path
 
+    def _get_all_obstacles(self) -> List[List[Tuple[float, float]]]:
+        """Get combined list of web API obstacles and ArUco-detected obstacles."""
+        with self._obstacles_lock:
+            web_obstacles = list(self._obstacles)
+        with self._aruco_obstacles_lock:
+            aruco_obstacles = list(self._aruco_obstacles)
+        return web_obstacles + aruco_obstacles
+
     # -------------------------------------------------------------------------
     # GUI Callbacks
     # -------------------------------------------------------------------------
@@ -515,14 +526,13 @@ class NavigationCoordinator(Coordinator):
         current_y = controller.car_state.y
         current_theta = controller.car_state.theta
 
-        # Plan path using RVG
-        with self._obstacles_lock:
-            obstacles_copy = list(self._obstacles)
+        # Plan path using RVG with all obstacles (web API + ArUco)
+        all_obstacles = self._get_all_obstacles()
 
         path = self._plan_path(
             (current_x, current_y, current_theta),
             (x, y, 0),  # theta=0 for goal (not used since no final rotation)
-            obstacles_copy
+            all_obstacles
         )
 
         if path is None or len(path) < 2:
@@ -757,7 +767,9 @@ class NavigationCoordinator(Coordinator):
     # -------------------------------------------------------------------------
 
     def process(
-        self, observations: Dict[int, RobotObservation]
+        self,
+        observations: Dict[int, RobotObservation],
+        aruco_obstacles: Optional[List[List[Tuple[float, float]]]] = None,
     ) -> Dict[int, Action]:
         """
         Process observations and return actions.
@@ -768,10 +780,16 @@ class NavigationCoordinator(Coordinator):
 
         Args:
             observations: Dict mapping robot_id to RobotObservation
+            aruco_obstacles: Optional list of ArUco-detected obstacle polygons
 
         Returns:
             Dict mapping robot_id to Action
         """
+        # Update ArUco obstacles if provided
+        if aruco_obstacles is not None:
+            with self._aruco_obstacles_lock:
+                self._aruco_obstacles = aruco_obstacles
+
         actions: Dict[int, Action] = {}
 
         for robot_id, controller in self._controllers.items():
@@ -918,19 +936,35 @@ class NavigationCoordinator(Coordinator):
                         "width": 2,
                     })
 
-        # Draw obstacles
+        # Draw web API obstacles (orange)
         with self._obstacles_lock:
-            obstacles_copy = list(self._obstacles)
+            web_obstacles = list(self._obstacles)
 
-        for i, obstacle in enumerate(obstacles_copy):
+        for i, obstacle in enumerate(web_obstacles):
             if len(obstacle) >= 3:
                 # Close the polygon
                 points = list(obstacle) + [obstacle[0]]
                 drawings.append({
-                    "uuid": f"obstacle_{i}",
+                    "uuid": f"obstacle_web_{i}",
                     "type": "path",
                     "points": points,
                     "color": "#FF6600",
+                    "width": 2,
+                })
+
+        # Draw ArUco-detected obstacles (magenta)
+        with self._aruco_obstacles_lock:
+            aruco_obstacles = list(self._aruco_obstacles)
+
+        for i, obstacle in enumerate(aruco_obstacles):
+            if len(obstacle) >= 3:
+                # Close the polygon
+                points = list(obstacle) + [obstacle[0]]
+                drawings.append({
+                    "uuid": f"obstacle_aruco_{i}",
+                    "type": "path",
+                    "points": points,
+                    "color": "#FF00FF",
                     "width": 2,
                 })
 
@@ -959,6 +993,8 @@ class NavigationCoordinator(Coordinator):
         self._clear_pending_path()
         with self._obstacles_lock:
             self._obstacles = []
+        with self._aruco_obstacles_lock:
+            self._aruco_obstacles = []
         super().reset()
 
     def close(self) -> None:
